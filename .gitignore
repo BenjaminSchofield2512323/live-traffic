@@ -2,4 +2,5 @@ frontend/node_modules/
 frontend/dist/
 backend/.cache/
 backend/api
+backend/artifacts/
 *.log
