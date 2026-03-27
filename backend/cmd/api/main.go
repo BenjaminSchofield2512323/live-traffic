@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	defaultPort      = "8080"
-	defaultBaseURL   = "https://511ny.org"
-	defaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+	defaultPort        = "8080"
+	defaultBaseURL     = "https://511ny.org"
+	defaultArtifactDir = "./artifacts"
+	defaultUserAgent   = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 )
 
 func main() {
@@ -27,19 +28,28 @@ func main() {
 
 	port := envOrDefault("PORT", defaultPort)
 	baseURL := envOrDefault("NY511_BASE_URL", defaultBaseURL)
+	artifactDir := envOrDefault("ARTIFACT_DIR", defaultArtifactDir)
+	webhookURL := strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_URL"))
 
 	client, err := newNY511Client(baseURL)
 	if err != nil {
 		logger.Error("failed to create 511 client", "error", err)
 		os.Exit(1)
 	}
+	pipeline, err := newPipelineManager(logger, client, artifactDir, webhookURL)
+	if err != nil {
+		logger.Error("failed to initialize pipeline manager", "error", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", withCORS(func(w http.ResponseWriter, _ *http.Request) {
+		status := pipeline.Status()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"service": "live-traffic-api",
-			"time":    time.Now().UTC(),
+			"ok":               true,
+			"service":          "live-traffic-api",
+			"time":             time.Now().UTC(),
+			"pipeline_running": status.Running,
 		})
 	}))
 
@@ -90,11 +100,11 @@ func main() {
 	}))
 
 	mux.HandleFunc("/api/v1/analysis/plan", withCORS(func(w http.ResponseWriter, _ *http.Request) {
-		// This endpoint keeps model choice explicit while we stand up inference workers.
+		// V1 keeps detection lightweight and explainable before heavier CV models.
 		writeJSON(w, http.StatusOK, map[string]any{
-			"inference_runtime":       "python-sidecar",
-			"detection_model":         "yolo (latest family, tuned for vehicles)",
-			"tracking_model":          "bytetrack",
+			"inference_runtime":       "go-heuristics-v1",
+			"detection_model":         "rolling-buffer + motion/occupancy heuristics",
+			"tracking_model":          "none (v1)",
 			"recommended_fps_per_cam": "2-5",
 			"latency_target_p95_sec":  3,
 			"alerts": []string{
@@ -103,8 +113,74 @@ func main() {
 				"queue_growth",
 				"camera_offline",
 			},
+			"pipeline_steps": []string{
+				"ingest",
+				"rolling_buffer",
+				"detection",
+				"event_scoring",
+				"trigger_and_clip",
+				"alert_output_and_webhook",
+			},
 		})
 	}))
+
+	mux.HandleFunc("/api/v1/pipeline/start", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use POST"})
+			return
+		}
+		var req startPipelineRequest
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		cfg := req.toConfig()
+		if err := pipeline.Start(r.Context(), cfg); err != nil {
+			if errors.Is(err, errPipelineAlreadyRunning) {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": pipeline.Status(),
+		})
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/stop", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use POST"})
+			return
+		}
+		pipeline.Stop()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": pipeline.Status(),
+		})
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/status", withCORS(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, pipeline.Status())
+	}))
+
+	mux.HandleFunc("/api/v1/alerts", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		limit := intQuery(r, "limit", 50)
+		if limit < 1 {
+			limit = 1
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		alerts := pipeline.ListAlerts(limit)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"count": len(alerts),
+			"data":  alerts,
+		})
+	}))
+
+	mux.Handle("/artifacts/", withCORSHandler(http.StripPrefix("/artifacts/", http.FileServer(http.Dir(artifactDir)))))
 
 	server := &http.Server{
 		Addr:              ":" + port,
@@ -112,7 +188,7 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	logger.Info("api listening", "port", port, "baseURL", baseURL)
+	logger.Info("api listening", "port", port, "baseURL", baseURL, "artifact_dir", artifactDir)
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server stopped unexpectedly", "error", err)
 		os.Exit(1)
@@ -224,6 +300,40 @@ func (c *ny511Client) primeSession(ctx context.Context) error {
 	return nil
 }
 
+func (c *ny511Client) fetchCameraImage(ctx context.Context, imageURL string) ([]byte, error) {
+	if imageURL == "" {
+		return nil, errors.New("empty image url")
+	}
+	targetURL := imageURL
+	if strings.HasPrefix(targetURL, "/") {
+		targetURL = c.baseURL + targetURL
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create image request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+	req.Header.Set("Referer", c.baseURL+"/cctv")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch camera image: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("camera image status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read camera image: %w", err)
+	}
+	return b, nil
+}
+
 type listResponse struct {
 	Draw            int      `json:"draw"`
 	RecordsTotal    int      `json:"recordsTotal"`
@@ -283,6 +393,7 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 		}
 
 		roadway := strings.ToUpper(c.Roadway)
+		corridor := corridorForRoadway(roadway)
 		score := 1
 		reason := "has live video"
 		for k, v := range priority {
@@ -302,7 +413,7 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 
 		scored = append(scored, scoredCamera{
 			Score:  score,
-			Why:    reason,
+			Why:    reason + "; " + corridor,
 			camera: c,
 		})
 	}
@@ -311,10 +422,34 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 		return scored[i].Score > scored[j].Score
 	})
 
-	if len(scored) > count {
-		return scored[:count]
+	// Prefer corridor diversity in the first pass, then fill remaining slots.
+	selected := make([]scoredCamera, 0, count)
+	perCorridor := map[string]int{}
+	for _, c := range scored {
+		corridor := corridorForRoadway(strings.ToUpper(c.Roadway))
+		if corridor == "" {
+			corridor = "other"
+		}
+		if perCorridor[corridor] >= 1 {
+			continue
+		}
+		selected = append(selected, c)
+		perCorridor[corridor]++
+		if len(selected) >= count {
+			return selected
+		}
 	}
-	return scored
+	for _, c := range scored {
+		if len(selected) >= count {
+			break
+		}
+		selected = append(selected, c)
+	}
+
+	if len(selected) > count {
+		return selected[:count]
+	}
+	return selected
 }
 
 func envOrDefault(key, fallback string) string {
@@ -350,8 +485,43 @@ func withCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func withCORSHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func decodeJSONBody(r *http.Request, out any) error {
+	if r.Body == nil {
+		return nil
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+	return nil
+}
+
+func corridorForRoadway(roadway string) string {
+	candidates := []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"}
+	for _, c := range candidates {
+		if strings.Contains(roadway, c) {
+			return c
+		}
+	}
+	return ""
 }

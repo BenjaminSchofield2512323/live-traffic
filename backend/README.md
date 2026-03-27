@@ -1,13 +1,21 @@
-# Backend (Go) - Live Traffic API
+# Backend (Go) - Incident Intelligence API
 
-This service is the control-plane API for v1.
+This service now implements a full v1 pipeline:
 
-## What it does now
+1. ingest camera metadata + snapshots from 511NY
+2. keep a rolling per-camera frame buffer
+3. run lightweight heuristics for incident signals
+4. score and suppress noisy candidates
+5. trigger evidence artifacts (before/after + clip)
+6. output structured alerts and optional webhook
 
-- Uses 511NY's internal data endpoint instead of scraping rendered HTML.
-- Primes session with `GET /cctv` and then fetches:
-  - `GET /List/GetData/Cameras?lang=en&query=...`
-- Returns camera lists and recommended 5-10 camera picks with live `videoUrl`.
+## Data source strategy
+
+Uses 511NY endpoint flow (same path behind "Show Video"), not HTML scraping:
+
+- session prime: `GET /cctv`
+- camera data: `GET /List/GetData/Cameras?lang=en&query=...`
+- image pulls: camera `images[].imageUrl`
 
 ## Endpoints
 
@@ -15,6 +23,11 @@ This service is the control-plane API for v1.
 - `GET /api/v1/cameras?start=0&length=25`
 - `GET /api/v1/cameras/recommended?count=10`
 - `GET /api/v1/analysis/plan`
+- `POST /api/v1/pipeline/start`
+- `POST /api/v1/pipeline/stop`
+- `GET /api/v1/pipeline/status`
+- `GET /api/v1/alerts?limit=100`
+- `GET /artifacts/...` (evidence files)
 
 ## Run locally
 
@@ -25,9 +38,51 @@ go run ./cmd/api
 
 Default bind: `:8080`
 
-## Notes
+## Pipeline defaults
 
-- Current recommendation logic is deterministic and corridor-priority based.
-- Inference is intentionally split for future sidecar workers:
-  - Go API: orchestration and metrics/alerts API
-  - Python worker: YOLO + tracking
+- cameras: 10 (bounded 5-10)
+- sample interval: 3s
+- rolling buffer: 90s
+- clip window: 30s pre-event + 45s post-event
+
+## Start/stop examples
+
+Start pipeline:
+
+```bash
+curl -X POST "http://localhost:8080/api/v1/pipeline/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "camera_count": 10,
+    "sample_interval_sec": 3,
+    "buffer_seconds": 90,
+    "pre_event_seconds": 30,
+    "post_event_seconds": 45
+  }'
+```
+
+Fetch alert feed:
+
+```bash
+curl "http://localhost:8080/api/v1/alerts?limit=20"
+```
+
+Stop pipeline:
+
+```bash
+curl -X POST "http://localhost:8080/api/v1/pipeline/stop"
+```
+
+## Webhook
+
+Set `ALERT_WEBHOOK_URL` to receive POSTed JSON alert payloads.
+
+## Artifact storage
+
+Set `ARTIFACT_DIR` (default `./artifacts`).
+
+For each alert, files are written to:
+
+- `before.jpg`
+- `after.jpg`
+- `event.gif`

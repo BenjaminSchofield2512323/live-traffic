@@ -1,12 +1,23 @@
-## Live Traffic Camera Intelligence (v1)
+## Live Traffic Incident Intelligence (v1)
 
-Go backend + React frontend for a fast traffic-intelligence MVP built on the same camera/video data flow used by 511NY's "Show Video" feature.
+Go backend + React frontend for an incident-intelligence MVP built on the same camera/video data flow used by 511NY's "Show Video" feature.
+
+### What this is now
+
+This is no longer just a camera discovery app. It now implements the core v1 loop:
+
+1. Ingest selected high-value camera feeds
+2. Keep rolling frame buffers (30-90s)
+3. Detect events with lightweight heuristics
+4. Score/filter noise
+5. Trigger evidence capture
+6. Publish structured alerts + webhook payloads
 
 ### Why this design
 
 - Uses **direct JSON endpoint ingestion** from 511NY (`/List/GetData/Cameras`) instead of scraping rendered HTML.
 - Keeps backend in **Go** for API reliability and low overhead.
-- Keeps computer vision in a **Python sidecar** when enabled (YOLO + tracking) for best model ecosystem support.
+- Starts with **light heuristic CV** in Go (fast + cheap for 5-10 cams), then can evolve to a Python YOLO sidecar.
 - Optimized for your value prop: **fast and cheap enough** for 5-10 cameras in v1.
 
 ---
@@ -33,6 +44,16 @@ Base URL: `http://localhost:8080`
   - Returns top camera candidates (5-10) for your MVP corridor focus.
 - `GET /api/v1/analysis/plan`
   - Returns baseline latency/model/alert strategy.
+- `POST /api/v1/pipeline/start`
+  - Starts rolling-buffer incident pipeline.
+- `POST /api/v1/pipeline/stop`
+  - Stops the pipeline.
+- `GET /api/v1/pipeline/status`
+  - Running state, camera count, uptime, config summary.
+- `GET /api/v1/alerts?limit=100`
+  - Structured incident alerts with evidence links.
+- `GET /artifacts/*`
+  - Serves saved before/after snapshots and event GIF clips.
 
 ### Run backend
 
@@ -61,6 +82,28 @@ npm run dev
 Open: `http://localhost:5173`
 
 Vite dev proxy forwards `/api` to backend on `localhost:8080`.
+
+### Local test flow (incident pipeline)
+
+1. Start backend + frontend
+2. Open UI and click **Start pipeline**
+3. Wait for detections (polls every 5s)
+4. Open alert evidence:
+   - before snapshot
+   - after snapshot
+   - event GIF clip
+
+You can also control via API:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/pipeline/start \
+  -H "Content-Type: application/json" \
+  -d '{"camera_count":10,"sample_interval_sec":3,"buffer_seconds":90,"pre_event_seconds":30,"post_event_seconds":45}'
+
+curl http://localhost:8080/api/v1/pipeline/status | jq
+curl "http://localhost:8080/api/v1/alerts?limit=20" | jq
+curl -X POST http://localhost:8080/api/v1/pipeline/stop
+```
 
 ---
 
@@ -109,7 +152,7 @@ Use CPU first, then promote inference workers to GPU only if p95 latency or accu
 
 ## Next build steps
 
-1. Add persistence schema (camera registry, metrics, alerts, detections).
-2. Add inference worker (Python sidecar) with model endpoint.
-3. Add live refresh + alert timeline in React.
-4. Add auth and tenant-ready API keys before production.
+1. Replace heuristics with tracked-object logic (YOLO + tracker) while preserving scoring/trigger contract.
+2. Persist alerts/metrics in Postgres and artifacts in S3 (instead of local disk).
+3. Add deduplication windows, suppression rules, and operator feedback loop.
+4. Add auth, tenant routing, and signed webhook delivery.
