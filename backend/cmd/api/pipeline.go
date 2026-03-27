@@ -107,7 +107,11 @@ func (p *pipelineRuntime) handleFocusStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	w.Header().Set("Content-Type", "image/jpeg")
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		contentType = "image/jpeg"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Focus-Mode", mode)
 	if mode == "processed" {
@@ -135,4 +139,3 @@ func normalizeFocusMode(mode string) string {
 		return "processed"
 	}
 }
-
