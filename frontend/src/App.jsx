@@ -22,6 +22,7 @@ function App() {
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [focusFPS, setFocusFPS] = useState(30)
+  const [detectorFPS, setDetectorFPS] = useState(2)
   /** Motion/occupancy from client-side frame diff on the HLS decode (same heuristics as API). */
   const [streamClientMetrics, setStreamClientMetrics] = useState(null)
   /** Detector-side metrics from YOLO sidecar via backend focus proxy. */
@@ -268,6 +269,20 @@ function App() {
                 }}
               />
             </label>
+            <label className="fpsLabel">
+              YOLO FPS
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value={detectorFPS}
+                onChange={(e) => {
+                  const next = Number(e.target.value)
+                  if (Number.isNaN(next)) return
+                  setDetectorFPS(Math.max(1, Math.min(10, next)))
+                }}
+              />
+            </label>
           </div>
         </div>
         {focusedView ? (
@@ -277,6 +292,7 @@ function App() {
                 key={`${focusCameraID}-${focusedView.stream_url}`}
                 streamUrl={focusedView.stream_url}
                 fps={focusFPS}
+                detectorFPS={detectorFPS}
                 cameraID={focusCameraID}
                 apiBase={apiBase}
                 onFrameMetrics={onStreamFrameMetrics}
@@ -303,8 +319,9 @@ function App() {
             )}
             {detectorMetrics?.metrics && (
               <p className="focusMeta">
-                <strong>YOLO (server, throttled):</strong> vehicles {detectorMetrics.metrics.vehicle_count ?? 0} |
-                moving {detectorMetrics.metrics.moving_vehicle_count ?? 0} | occupancy{' '}
+                <strong>YOLO (server, {detectorFPS} fps target):</strong> vehicles{' '}
+                {detectorMetrics.metrics.vehicle_count ?? 0} | moving{' '}
+                {detectorMetrics.metrics.moving_vehicle_count ?? 0} | occupancy{' '}
                 {(detectorMetrics.metrics.occupancy_ratio ?? 0).toFixed(4)} | infer{' '}
                 {Number(detectorMetrics.inference_ms ?? 0).toFixed(1)}ms
               </p>

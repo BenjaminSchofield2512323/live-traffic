@@ -17,7 +17,15 @@ function absolutize511StreamUrl(u) {
  * Hidden HLS video decodes the stream; two canvases show raw vs processed (overlay)
  * at the requested FPS — no visible video player.
  */
-export function FocusStreamFrames({ streamUrl, fps, cameraID, apiBase, onFrameMetrics, onDetectionMetrics }) {
+export function FocusStreamFrames({
+  streamUrl,
+  fps,
+  detectorFPS = 2,
+  cameraID,
+  apiBase,
+  onFrameMetrics,
+  onDetectionMetrics,
+}) {
   const videoRef = useRef(null)
   const hlsRef = useRef(null)
   const rawRef = useRef(null)
@@ -121,7 +129,8 @@ export function FocusStreamFrames({ streamUrl, fps, cameraID, apiBase, onFrameMe
 
     const ctxM = metricsCanvas.getContext('2d', { willReadFrequently: true })
     const intervalMs = 1000 / Math.max(1, Math.min(30, fps))
-    const detectorIntervalMs = 1000 / 2 // throttle YOLO path to ~2 fps for now
+    const boundedDetectorFPS = Math.max(1, Math.min(10, Number(detectorFPS) || 2))
+    const detectorIntervalMs = 1000 / boundedDetectorFPS
 
     const tick = (now) => {
       if (video.readyState < 2 || !video.videoWidth) {
@@ -232,7 +241,7 @@ export function FocusStreamFrames({ streamUrl, fps, cameraID, apiBase, onFrameMe
       cancelAnimationFrame(rafRef.current)
       prevGrayRef.current = null
     }
-  }, [fps, streamUrl, cameraID, apiBase])
+  }, [fps, detectorFPS, streamUrl, cameraID, apiBase])
 
   return (
     <div className="focusStreamFrames">
