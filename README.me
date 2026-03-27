@@ -90,9 +90,26 @@ Open: `http://localhost:5173`
 
 Vite dev proxy forwards `/api` to backend on `localhost:8080`.
 
+### One command for everything (recommended)
+
+From repo root:
+
+```bash
+make setup
+make dev
+```
+
+This starts:
+
+- backend API on `:8080`
+- frontend on `:5173`
+- YOLO detector sidecar on `:8090`
+
+If your machine cannot create a Python virtualenv, `make setup` falls back to a user-level pip install for detector dependencies.
+
 ### Local test flow (incident pipeline)
 
-1. Start backend + frontend
+1. Run `make dev` from repo root
 2. Open UI and click **Start pipeline**
 3. Wait for detections (polls every 5s)
 4. Open alert evidence:

@@ -55,6 +55,17 @@ go run ./cmd/api
 
 Default bind: `:8080`
 
+## One-command local dev
+
+From repo root:
+
+```bash
+make setup
+make dev
+```
+
+This runs backend (`:8080`), frontend (`:5173`), and detector sidecar (`:8090`) together.
+
 ## Pipeline defaults
 
 - cameras: 10 (bounded 5-10)
