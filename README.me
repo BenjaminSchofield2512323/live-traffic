@@ -16,6 +16,8 @@ Go backend + React frontend for a fast traffic-intelligence MVP built on the sam
 ```text
 backend/
   cmd/api/main.go      # Go HTTP API + 511 camera client
+detector_spike/
+  app.py               # FastAPI YOLO + MOT (ByteTrack via Ultralytics track)
 frontend/
   src/                 # React dashboard
 ```
@@ -37,6 +39,7 @@ Base URL: `http://localhost:8080`
   - Returns focus snapshot stream bytes for `<img>` usage (`mode=raw` is treated as `processed`).
 - `POST /api/v1/pipeline/focus/detect?stream_id=cam-49&imgsz=640&conf=0.25`
   - Fetches current focus snapshot and forwards bytes to detector sidecar (`DETECTOR_BASE_URL/internal/detect`).
+  - Supports passthrough MOT/ROI params (`iou`, `roi`, `lanes`, `direction`, `moving_speed_threshold_px_s`, `smoothing_window_sec`, `debug_overlay`).
   - Returns workflow state (`running`/`cooldown`/`ready`) to prevent detector request floods.
 - `GET /api/v1/analysis/plan`
   - Returns baseline latency/model/alert strategy.

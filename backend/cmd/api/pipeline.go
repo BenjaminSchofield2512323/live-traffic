@@ -344,10 +344,24 @@ func minInt(a, b int) int {
 }
 
 func parseDetectQuery(r *http.Request) detectQuery {
+	var debugOverlay *bool
+	if raw := strings.TrimSpace(r.URL.Query().Get("debug_overlay")); raw != "" {
+		v := strings.EqualFold(raw, "1") || strings.EqualFold(raw, "true") || strings.EqualFold(raw, "yes")
+		debugOverlay = &v
+	}
+
 	return detectQuery{
-		StreamID: strings.TrimSpace(r.URL.Query().Get("stream_id")),
-		ImgSize:  intQuery(r, "imgsz", 640),
-		Conf:     floatQuery(r, "conf", 0.25),
+		StreamID:                strings.TrimSpace(r.URL.Query().Get("stream_id")),
+		ImgSize:                 intQuery(r, "imgsz", 640),
+		Conf:                    floatQuery(r, "conf", 0.25),
+		IOU:                     floatQuery(r, "iou", 0.45),
+		ROI:                     strings.TrimSpace(r.URL.Query().Get("roi")),
+		Lanes:                   strings.TrimSpace(r.URL.Query().Get("lanes")),
+		Direction:               strings.TrimSpace(r.URL.Query().Get("direction")),
+		MovingSpeedThresholdPxS: floatQuery(r, "moving_speed_threshold_px_s", 12.0),
+		SmoothingWindowSec:      floatQuery(r, "smoothing_window_sec", 0.0),
+		DebugOverlay:            debugOverlay,
+		ExtraQuery:              r.URL.Query(),
 	}
 }
 

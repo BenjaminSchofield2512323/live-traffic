@@ -37,6 +37,9 @@ Default bind: `:8080`
 - Focus detect flow:
   - fetches current focus snapshot from selected camera
   - forwards JPEG to detector sidecar at `${DETECTOR_BASE_URL}/internal/detect`
+  - supports detector tuning passthrough query params:
+    - `iou`, `roi`, `lanes`, `direction`, `moving_speed_threshold_px_s`,
+      `smoothing_window_sec`, `debug_overlay`
   - tracks workflow progress and cooldown to avoid detector request floods
 - Inference is intentionally split for future sidecar workers:
   - Go API: orchestration and metrics/alerts API

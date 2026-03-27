@@ -28,6 +28,11 @@ function App() {
     lastError: '',
     lastDurationMs: 0,
     detectionsCount: 0,
+    tracksCount: 0,
+    queueLike: false,
+    stoppedLike: false,
+    meanSmoothedSpeedPxS: 0,
+    laneCounts: {},
   })
   const [focusCacheBust, setFocusCacheBust] = useState(Date.now())
   const [loading, setLoading] = useState(true)
@@ -121,11 +126,14 @@ function App() {
           const payload = await detectResp.json()
           const workflow = payload?.workflow || {}
           const detections = payload?.detector?.detections
+          const tracks = payload?.detector?.tracks
+          const metrics = payload?.detector?.metrics || {}
           const detectionsCount = Array.isArray(detections)
             ? detections.length
             : Array.isArray(payload?.detector?.boxes)
               ? payload.detector.boxes.length
               : 0
+          const tracksCount = Array.isArray(tracks) ? tracks.length : 0
 
           setDetectStatus({
             phase: workflow.phase || (payload.ok ? 'ready' : 'cooldown'),
@@ -136,6 +144,14 @@ function App() {
             lastError: payload.error || workflow.last_error || '',
             lastDurationMs: Number(workflow.last_duration_ms || 0),
             detectionsCount,
+            tracksCount,
+            queueLike: Boolean(metrics.queue_like),
+            stoppedLike: Boolean(metrics.stopped_like),
+            meanSmoothedSpeedPxS: Number(metrics.mean_smoothed_speed_px_s || 0),
+            laneCounts:
+              metrics.counts_per_lane && typeof metrics.counts_per_lane === 'object'
+                ? metrics.counts_per_lane
+                : {},
           })
 
           const cooldown = Number(workflow.retry_after_ms || 0)
@@ -220,6 +236,17 @@ function App() {
             {detectStatus.retryAfterMs > 0 ? ` | retry in ${detectStatus.retryAfterMs}ms` : ''}
           </small>
         </article>
+        <article className="metricCard">
+          <h2>Tracked Vehicles</h2>
+          <p className="metricValue">{detectStatus.tracksCount}</p>
+          <small>
+            mean speed: {detectStatus.meanSmoothedSpeedPxS.toFixed(1)} px/s
+            {' | '}
+            queue_like: {detectStatus.queueLike ? 'yes' : 'no'}
+            {' | '}
+            stopped_like: {detectStatus.stoppedLike ? 'yes' : 'no'}
+          </small>
+        </article>
       </section>
 
       <section className="alerts">
@@ -234,6 +261,14 @@ function App() {
       <section className="focusPanel">
         <h2>Focus Stream</h2>
         {detectStatus.lastError && <p className="warn">Detector: {detectStatus.lastError}</p>}
+        {Object.keys(detectStatus.laneCounts || {}).length > 0 && (
+          <p className="focusLaneMeta">
+            Lane counts:{' '}
+            {Object.entries(detectStatus.laneCounts)
+              .map(([lane, count]) => `${lane}=${count}`)
+              .join(' | ')}
+          </p>
+        )}
         <div className="focusGrid">
           <article className="focusCard">
             <h3>Raw Snapshot (mode=live)</h3>

@@ -18,9 +18,17 @@ type detectorClient struct {
 }
 
 type detectQuery struct {
-	StreamID string
-	ImgSize  int
-	Conf     float64
+	StreamID                string
+	ImgSize                 int
+	Conf                    float64
+	IOU                     float64
+	ROI                     string
+	Lanes                   string
+	Direction               string
+	MovingSpeedThresholdPxS float64
+	SmoothingWindowSec      float64
+	DebugOverlay            *bool
+	ExtraQuery              url.Values
 }
 
 type detectorPayload map[string]any
@@ -55,6 +63,45 @@ func (d *detectorClient) Detect(ctx context.Context, imageBytes []byte, q detect
 	}
 	if q.Conf > 0 {
 		params.Set("conf", fmt.Sprintf("%.4f", q.Conf))
+	}
+	if q.IOU > 0 {
+		params.Set("iou", fmt.Sprintf("%.4f", q.IOU))
+	}
+	if v := strings.TrimSpace(q.ROI); v != "" {
+		params.Set("roi", v)
+	}
+	if v := strings.TrimSpace(q.Lanes); v != "" {
+		params.Set("lanes", v)
+	}
+	if v := strings.TrimSpace(q.Direction); v != "" {
+		params.Set("direction", v)
+	}
+	if q.MovingSpeedThresholdPxS > 0 {
+		params.Set("moving_speed_threshold_px_s", fmt.Sprintf("%.4f", q.MovingSpeedThresholdPxS))
+	}
+	if q.SmoothingWindowSec > 0 {
+		params.Set("smoothing_window_sec", fmt.Sprintf("%.4f", q.SmoothingWindowSec))
+	}
+	if q.DebugOverlay != nil {
+		if *q.DebugOverlay {
+			params.Set("debug_overlay", "true")
+		} else {
+			params.Set("debug_overlay", "false")
+		}
+	}
+	// Backward-compatible query passthrough for clients using generic params.
+	if q.ExtraQuery != nil {
+		for key, vals := range q.ExtraQuery {
+			k := strings.TrimSpace(key)
+			if k == "" || len(vals) == 0 {
+				continue
+			}
+			v := strings.TrimSpace(vals[len(vals)-1])
+			if v == "" {
+				continue
+			}
+			params.Set(k, v)
+		}
 	}
 	endpoint.RawQuery = params.Encode()
 
