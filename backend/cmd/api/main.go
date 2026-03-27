@@ -225,6 +225,23 @@ func main() {
 		pipeline.StreamFocus(w, r, cameraID, mode, fps)
 	})
 
+	mux.HandleFunc("/api/v1/pipeline/focus/snapshot", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use GET"})
+			return
+		}
+		cameraID := intQuery(r, "camera_id", 0)
+		if cameraID <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
+			return
+		}
+		mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+		if mode == "" {
+			mode = "processed"
+		}
+		pipeline.WriteFocusSnapshot(r.Context(), w, cameraID, mode)
+	}))
+
 	mux.HandleFunc("/api/v1/alerts", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		limit := boundedIntQuery(r, "limit", defaultAlertListLimit, minAlertListLimit, maxAlertListLimit)
 		alerts := pipeline.ListAlerts(limit)
@@ -378,6 +395,55 @@ func (c *ny511Client) fetchCameraImage(ctx context.Context, imageURL string) ([]
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
 	req.Header.Set("Referer", c.baseURL+"/cctv")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch camera image: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("camera image status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read camera image: %w", err)
+	}
+	return b, nil
+}
+
+// cacheBustURL appends a unique query param so CDNs / reverse proxies don't keep
+// serving the same JPEG bytes for identical snapshot URLs.
+func cacheBustURL(imageURL string) string {
+	sep := "?"
+	if strings.Contains(imageURL, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf("%s%st=%d", imageURL, sep, time.Now().UnixNano())
+}
+
+// fetchCameraImageFresh requests the snapshot with a unique URL and no-cache headers
+// so each poll can receive a newly rendered frame from 511.
+func (c *ny511Client) fetchCameraImageFresh(ctx context.Context, imageURL string) ([]byte, error) {
+	if imageURL == "" {
+		return nil, errors.New("empty image url")
+	}
+	targetURL := imageURL
+	if strings.HasPrefix(targetURL, "/") {
+		targetURL = c.baseURL + targetURL
+	}
+	targetURL = cacheBustURL(targetURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create image request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+	req.Header.Set("Referer", c.baseURL+"/cctv")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
