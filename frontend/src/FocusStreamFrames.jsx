@@ -5,6 +5,65 @@ import { deriveMetrics, drawProcessedOverlay, imageDataToGray } from './focusFra
 const MW = 64
 const MH = 36
 
+function normalizeDetectorPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return { image: null, detections: [], geometry: null }
+  }
+  const inner = payload.detector && typeof payload.detector === 'object' ? payload.detector : payload
+  const image = inner.image ?? payload.image ?? null
+  const detections = Array.isArray(inner.detections) ? inner.detections : []
+  const geometry = inner.geometry && typeof inner.geometry === 'object' ? inner.geometry : null
+  return { image, detections, geometry }
+}
+
+function drawGeometryOverlay(procCtx, geometry, sx, sy) {
+  if (!geometry || typeof geometry !== 'object') return
+  const roadPolygon = Array.isArray(geometry.road_polygon) ? geometry.road_polygon : []
+  const lanes = Array.isArray(geometry.lanes) ? geometry.lanes : []
+
+  const drawPoly = (poly, strokeStyle, lineWidth) => {
+    if (!Array.isArray(poly) || poly.length < 3) return
+    procCtx.beginPath()
+    poly.forEach((point, idx) => {
+      if (!Array.isArray(point) || point.length < 2) return
+      const px = Number(point[0]) * sx
+      const py = Number(point[1]) * sy
+      if (idx === 0) {
+        procCtx.moveTo(px, py)
+      } else {
+        procCtx.lineTo(px, py)
+      }
+    })
+    procCtx.closePath()
+    procCtx.strokeStyle = strokeStyle
+    procCtx.lineWidth = lineWidth
+    procCtx.stroke()
+  }
+
+  // Road polygon first, then lane boundaries on top.
+  drawPoly(roadPolygon, 'rgba(0, 220, 255, 0.65)', 2)
+  lanes.forEach((lane) => {
+    const poly = lane && Array.isArray(lane.polygon) ? lane.polygon : []
+    drawPoly(poly, 'rgba(255, 184, 0, 0.7)', 1.5)
+    if (!Array.isArray(poly) || poly.length < 3) return
+    let cx = 0
+    let cy = 0
+    let n = 0
+    poly.forEach((point) => {
+      if (!Array.isArray(point) || point.length < 2) return
+      cx += Number(point[0]) * sx
+      cy += Number(point[1]) * sy
+      n += 1
+    })
+    if (n <= 0) return
+    cx /= n
+    cy /= n
+    procCtx.font = '11px sans-serif'
+    procCtx.fillStyle = 'rgba(255, 184, 0, 0.9)'
+    procCtx.fillText(String(lane.lane_id || 'lane'), cx, cy)
+  })
+}
+
 function absolutize511StreamUrl(u) {
   if (!u) return ''
   const s = String(u).trim()
@@ -172,12 +231,13 @@ export function FocusStreamFrames({
       prevGrayRef.current = gray
 
       drawProcessedOverlay(procCtx, dw, dh, motion, occupancy)
-      const detectorPayload = latestDetectionRef.current
+      const detectorPayload = normalizeDetectorPayload(latestDetectionRef.current)
       if (detectorPayload?.image && Array.isArray(detectorPayload.detections)) {
         const detW = Number(detectorPayload.image.width || 0) || dw
         const detH = Number(detectorPayload.image.height || 0) || dh
         const sx = detW > 0 ? dw / detW : 1
         const sy = detH > 0 ? dh / detH : 1
+        drawGeometryOverlay(procCtx, detectorPayload.geometry, sx, sy)
 
         procCtx.lineWidth = 2
         procCtx.strokeStyle = 'rgba(45,210,80,0.95)'
@@ -191,7 +251,10 @@ export function FocusStreamFrames({
           const bw = Math.max(1, (x2 - x1) * sx)
           const bh = Math.max(1, (y2 - y1) * sy)
           procCtx.strokeRect(bx, by, bw, bh)
-          const tag = `${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
+          const lane =
+            d.lane_id != null && String(d.lane_id).trim() !== '' ? `${String(d.lane_id)} ` : ''
+          const track = d.track_id != null ? `#${String(d.track_id)} ` : ''
+          const tag = `${track}${lane}${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
           procCtx.fillText(tag, bx + 2, Math.max(12, by - 3))
         })
       }

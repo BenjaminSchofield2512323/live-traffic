@@ -389,6 +389,12 @@ def _resolve_lane_id(geom: Geometry, x: float, y: float) -> str | None:
     return None
 
 
+def _polygon_to_points(poly: np.ndarray) -> list[list[int]]:
+    if poly.size == 0:
+        return []
+    return [[int(p[0]), int(p[1])] for p in poly.tolist()]
+
+
 def _debug_overlay(
     image: np.ndarray,
     tracks: list[dict[str, Any]],
@@ -633,6 +639,11 @@ async def detect(
         "frame_seq": frame_seq,
         "frame_ts_unix_ms": frame_ts_unix_ms,
         "ts_unix_ms": frame_ts_unix_ms,
+        "geometry": {
+            "road_polygon": _polygon_to_points(geom.road_polygon),
+            "direction": [float(geom.direction[0]), float(geom.direction[1])],
+            "lanes": [{"lane_id": lane.lane_id, "polygon": _polygon_to_points(lane.polygon)} for lane in geom.lanes],
+        },
         # Backward compatible payload used by current UI.
         "detections": detections,
         # New richer tracking contract for downstream analytics.
