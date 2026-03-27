@@ -1,1 +1,115 @@
-TODO
+## Live Traffic Camera Intelligence (v1)
+
+Go backend + React frontend for a fast traffic-intelligence MVP built on the same camera/video data flow used by 511NY's "Show Video" feature.
+
+### Why this design
+
+- Uses **direct JSON endpoint ingestion** from 511NY (`/List/GetData/Cameras`) instead of scraping rendered HTML.
+- Keeps backend in **Go** for API reliability and low overhead.
+- Keeps computer vision in a **Python sidecar** when enabled (YOLO + tracking) for best model ecosystem support.
+- Optimized for your value prop: **fast and cheap enough** for 5-10 cameras in v1.
+
+---
+
+## Repo layout
+
+```text
+backend/
+  cmd/api/main.go      # Go HTTP API + 511 camera client
+frontend/
+  src/                 # React dashboard
+```
+
+---
+
+## Backend API
+
+Base URL: `http://localhost:8080`
+
+- `GET /healthz`
+- `GET /api/v1/cameras?start=0&length=25`
+  - Calls 511NY's camera JSON endpoint with browser-like headers + session priming.
+- `GET /api/v1/cameras/recommended?count=10`
+  - Returns top camera candidates (5-10) for your MVP corridor focus.
+- `GET /api/v1/analysis/plan`
+  - Returns baseline latency/model/alert strategy.
+
+### Run backend
+
+```bash
+cd backend
+go run ./cmd/api
+```
+
+Environment variables:
+
+- `PORT` (default `8080`)
+- `NY511_BASE_URL` (default `https://511ny.org`)
+
+---
+
+## Frontend dashboard
+
+### Run frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open: `http://localhost:5173`
+
+Vite dev proxy forwards `/api` to backend on `localhost:8080`.
+
+---
+
+## Camera source details
+
+This project intentionally uses the same underlying data path as the 511NY page you shared:
+
+1. Prime session via `GET /cctv`
+2. Fetch camera list via `GET /List/GetData/Cameras?...`
+3. Read per-camera `images[].videoUrl` (this is what "Show Video" uses)
+
+This is more stable than DOM scraping and easier to monitor for schema changes.
+
+---
+
+## Suggested v1 scope (your current choices)
+
+- Camera count: **5-10**
+- Priority: **speed over depth**
+- Alerts: **congestion + stopped vehicle + queue growth + camera offline**
+- Data retention: **store everything** (metrics + snapshots/clips policy to be implemented in storage layer)
+- Cloud: **AWS**, cheapest acceptable
+
+---
+
+## AWS deployment (cheap-first)
+
+### Start here
+
+- **ECS Fargate** (single service for Go API)
+- **CloudWatch Logs** for app logs
+- **RDS Postgres** (small instance) for metadata/metrics
+- **S3** for snapshots/clips (lifecycle policy to manage cost)
+- **ElastiCache Redis** only when you need alert fan-out/queues
+
+### GPU decision
+
+You likely **do not need a GPU on day 1** for 5-10 cameras if:
+
+- you sample at ~2 FPS, and
+- you start with a light model variant.
+
+Use CPU first, then promote inference workers to GPU only if p95 latency or accuracy drops under load.
+
+---
+
+## Next build steps
+
+1. Add persistence schema (camera registry, metrics, alerts, detections).
+2. Add inference worker (Python sidecar) with model endpoint.
+3. Add live refresh + alert timeline in React.
+4. Add auth and tenant-ready API keys before production.
