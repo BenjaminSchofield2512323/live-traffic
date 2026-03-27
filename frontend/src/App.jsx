@@ -506,9 +506,26 @@ function App() {
                       <span className="focusMetricLabel">YOLO FPS cap</span>
                       <span className="focusMetricValue">{detectorFPS}</span>
                     </div>
+                    <div className="focusMetricPill">
+                      <span className="focusMetricLabel">Lane polygons</span>
+                      <span className="focusMetricValue">
+                        {Array.isArray(detectorMetrics.geometry?.lanes)
+                          ? detectorMetrics.geometry.lanes.length
+                          : 0}
+                      </span>
+                    </div>
                   </>
                 )}
               </div>
+              {detectorMetrics?.metrics?.counts_per_lane &&
+                Object.keys(detectorMetrics.metrics.counts_per_lane).length > 0 && (
+                  <p className="focusLaneMeta">
+                    <strong>Lane counts:</strong>{' '}
+                    {Object.entries(detectorMetrics.metrics.counts_per_lane)
+                      .map(([laneID, count]) => `${laneID}:${count}`)
+                      .join(' | ')}
+                  </p>
+                )}
               {focusedView.stream_url && (
                 <a className="focusStreamLink" href={focusedView.stream_url} target="_blank" rel="noreferrer">
                   Open stream in new tab

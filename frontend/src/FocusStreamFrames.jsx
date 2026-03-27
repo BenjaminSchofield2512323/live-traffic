@@ -20,6 +20,52 @@ function normalizeDetectorPayload(p) {
   return { image, detections }
 }
 
+function drawLanePolygons(ctx, payload, dw, dh) {
+  const geometry = payload?.geometry ?? payload?.detector?.geometry
+  if (!geometry || !Array.isArray(geometry.lanes) || geometry.lanes.length === 0) {
+    return
+  }
+  const detW = Number(payload?.image?.width || payload?.detector?.image?.width || 0) || dw
+  const detH = Number(payload?.image?.height || payload?.detector?.image?.height || 0) || dh
+  const sx = detW > 0 ? dw / detW : 1
+  const sy = detH > 0 ? dh / detH : 1
+
+  ctx.save()
+  ctx.lineWidth = 2
+  ctx.strokeStyle = 'rgba(80,180,255,0.95)'
+  ctx.fillStyle = 'rgba(80,180,255,0.10)'
+  ctx.font = '12px sans-serif'
+
+  geometry.lanes.forEach((lane) => {
+    const poly = Array.isArray(lane?.polygon) ? lane.polygon : []
+    if (poly.length < 3) return
+
+    ctx.beginPath()
+    poly.forEach((pt, i) => {
+      if (!Array.isArray(pt) || pt.length < 2) return
+      const x = Number(pt[0]) * sx
+      const y = Number(pt[1]) * sy
+      if (i === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    })
+    ctx.closePath()
+    ctx.fill()
+    ctx.stroke()
+
+    // Label near centroid for lane readability.
+    const validPts = poly.filter((pt) => Array.isArray(pt) && pt.length >= 2)
+    if (validPts.length > 0) {
+      const cx = validPts.reduce((acc, pt) => acc + Number(pt[0]), 0) / validPts.length
+      const cy = validPts.reduce((acc, pt) => acc + Number(pt[1]), 0) / validPts.length
+      const laneID = String(lane?.lane_id ?? lane?.id ?? 'lane')
+      ctx.fillStyle = 'rgba(80,180,255,0.95)'
+      ctx.fillText(laneID, cx * sx + 2, cy * sy - 2)
+      ctx.fillStyle = 'rgba(80,180,255,0.10)'
+    }
+  })
+  ctx.restore()
+}
+
 function absolutize511StreamUrl(u) {
   if (!u) return ''
   const s = String(u).trim()
@@ -189,6 +235,7 @@ export function FocusStreamFrames({
       drawProcessedOverlay(procCtx, dw, dh, motion, occupancy)
       const rawPayload = latestDetectionRef.current
       const { image: detImage, detections: detList } = normalizeDetectorPayload(rawPayload)
+      drawLanePolygons(procCtx, rawPayload, dw, dh)
       if (Array.isArray(detList) && detList.length > 0) {
         const detW = Number(detImage?.width || 0) || dw
         const detH = Number(detImage?.height || 0) || dh

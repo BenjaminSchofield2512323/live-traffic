@@ -113,6 +113,9 @@ For each request:
 - `frame_ts_unix_ms`
 - `detections[]` (backward-compatible)
 - `tracks[]` (new richer tracking output)
+- `geometry`:
+  - `road_polygon`
+  - `lanes[]` (`lane_id` + polygon points) for frontend polygon overlays
 - `metrics`:
   - `counts_per_lane`, `counts_per_roi`
   - `mean_smoothed_speed_px_s`, `median_smoothed_speed_px_s`

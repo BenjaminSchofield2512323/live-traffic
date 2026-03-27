@@ -430,6 +430,10 @@ def _debug_overlay(
     return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
+def _poly_to_points(poly: np.ndarray) -> list[list[int]]:
+    return [[int(p[0]), int(p[1])] for p in poly.tolist()]
+
+
 TRACK_MAX_AGE_SEC = _env_float("DETECTOR_TRACK_MAX_AGE_SEC", 4.0)
 TRACK_MIN_HITS = _env_int("DETECTOR_TRACK_MIN_HITS", 2)
 SMOOTH_WINDOW_SEC = _env_float("DETECTOR_SMOOTH_WINDOW_SEC", 1.0)
@@ -631,6 +635,11 @@ async def detect(
         "tracker": TRACKER_CONFIG,
         "inference_ms": round(inference_ms, 2),
         "image": {"width": width, "height": height},
+        "geometry": {
+            "road_polygon": _poly_to_points(geom.road_polygon),
+            "lanes": [{"lane_id": lane.lane_id, "polygon": _poly_to_points(lane.polygon)} for lane in geom.lanes],
+            "direction": [float(geom.direction[0]), float(geom.direction[1])],
+        },
         "stream_id": stream_id,
         "frame_seq": frame_seq,
         "frame_ts_unix_ms": frame_ts_unix_ms,

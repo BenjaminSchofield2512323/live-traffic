@@ -66,6 +66,7 @@ Base URL: `http://localhost:8080`
   - MJPEG focus stream for near-real-time browser viewing (target up to 30fps).
 - `POST /api/v1/pipeline/focus/detect?camera_id=...`
   - Proxies image bytes to YOLO sidecar (`/internal/detect`) for focused-view overlay boxes + object metrics.
+  - Includes lane geometry (`geometry.lanes`) when provided by detector config/query, enabling polygon lane overlays in focused view.
 - `GET /api/v1/alerts?limit=100`
   - Structured incident alerts with evidence links.
 - `GET /artifacts/*`
