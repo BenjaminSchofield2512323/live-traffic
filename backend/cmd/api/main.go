@@ -47,6 +47,7 @@ func main() {
 	port := envOrDefault("PORT", defaultPort)
 	baseURL := envOrDefault("NY511_BASE_URL", defaultBaseURL)
 	artifactDir := envOrDefault("ARTIFACT_DIR", defaultArtifactDir)
+	detectorBaseURL := envOrDefault("DETECTOR_BASE_URL", defaultDetectorBaseURL)
 	webhookURL := strings.TrimSpace(os.Getenv("ALERT_WEBHOOK_URL"))
 
 	client, err := newNY511Client(baseURL)
@@ -57,6 +58,11 @@ func main() {
 	pipeline, err := newPipelineManager(logger, client, artifactDir, webhookURL)
 	if err != nil {
 		logger.Error("failed to initialize pipeline manager", "error", err)
+		os.Exit(1)
+	}
+	detector, err := newDetectorClient(detectorBaseURL)
+	if err != nil {
+		logger.Error("failed to initialize detector client", "error", err, "detector_base_url", detectorBaseURL)
 		os.Exit(1)
 	}
 
@@ -240,6 +246,53 @@ func main() {
 			mode = "processed"
 		}
 		pipeline.WriteFocusSnapshot(r.Context(), w, cameraID, mode)
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/focus/detect", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use POST"})
+			return
+		}
+
+		cameraID := intQuery(r, "camera_id", 0)
+		if cameraID <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
+			return
+		}
+		if !pipeline.HasCamera(cameraID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "camera not active in current pipeline"})
+			return
+		}
+
+		imageBytes, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read image bytes"})
+			return
+		}
+		if len(imageBytes) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body must contain image bytes"})
+			return
+		}
+
+		q := r.URL.Query()
+		if strings.TrimSpace(q.Get("stream_id")) == "" {
+			q.Set("stream_id", fmt.Sprintf("cam-%d", cameraID))
+		}
+		if strings.TrimSpace(q.Get("imgsz")) == "" {
+			q.Set("imgsz", "640")
+		}
+		if strings.TrimSpace(q.Get("conf")) == "" {
+			q.Set("conf", "0.25")
+		}
+
+		detectCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		defer cancel()
+		payload, err := detector.Detect(detectCtx, imageBytes, q)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
 	}))
 
 	mux.HandleFunc("/api/v1/alerts", withCORS(func(w http.ResponseWriter, r *http.Request) {

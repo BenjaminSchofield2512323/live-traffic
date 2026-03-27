@@ -54,6 +54,8 @@ Base URL: `http://localhost:8080`
   - Live per-camera processing view (raw + processed frame URLs + metrics).
 - `GET /api/v1/pipeline/focus/stream?camera_id=...&mode=processed|raw&fps=30`
   - MJPEG focus stream for near-real-time browser viewing (target up to 30fps).
+- `POST /api/v1/pipeline/focus/detect?camera_id=...`
+  - Proxies image bytes to YOLO sidecar (`/internal/detect`) for focused-view overlay boxes + object metrics.
 - `GET /api/v1/alerts?limit=100`
   - Structured incident alerts with evidence links.
 - `GET /artifacts/*`
@@ -70,6 +72,7 @@ Environment variables:
 
 - `PORT` (default `8080`)
 - `NY511_BASE_URL` (default `https://511ny.org`)
+- `DETECTOR_BASE_URL` (default `http://localhost:8090`)
 
 ---
 
