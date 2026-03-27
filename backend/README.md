@@ -31,6 +31,20 @@ Uses 511NY endpoint flow (same path behind "Show Video"), not HTML scraping:
 - `GET /api/v1/alerts?limit=100`
 - `GET /artifacts/...` (evidence files)
 
+## Maintainability notes
+
+The backend is organized into smaller modules to keep frame-analysis changes safer:
+
+- `main.go`: HTTP route wiring + server bootstrap
+- `pipeline.go`: runtime loop, buffering, scoring, alert triggering
+- `camera_selection.go`: camera catalog pagination + live-selection helpers
+- `http_utils.go`: shared JSON/CORS request helpers
+- `config_utils.go`: query/config parsing helpers
+- `metrics_utils.go`: shared metric utilities used by signal scoring
+- `math_utils.go`: shared numeric helpers (clamp/min/max)
+
+If you modify frame analysis logic, prefer changing pure helpers first (`evaluateSignals`, metric helpers) and keep orchestration code in `processCamera` minimal.
+
 ## Run locally
 
 ```bash

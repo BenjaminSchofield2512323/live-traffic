@@ -297,6 +297,13 @@ func (m *pipelineManager) ListCameraViews() []cameraLiveView {
 	return out
 }
 
+func (m *pipelineManager) HasCamera(cameraID int) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.views[cameraID]
+	return ok
+}
+
 func (m *pipelineManager) StreamFocus(w http.ResponseWriter, r *http.Request, cameraID int, streamType string, fps int) {
 	sType := mjpegStreamType(strings.ToLower(strings.TrimSpace(streamType)))
 	if sType != streamTypeLive && sType != streamTypeProcessed {
@@ -511,19 +518,10 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 	feed := cam.Meta.Images[0]
 	imgRaw, err := m.client.fetchCameraImage(ctx, feed.ImageURL)
 	if err != nil {
-		cam.Failures++
-		cam.LastError = err.Error()
-		m.updateCameraView(cam, frameMetrics{At: now}, "", "", err)
-		if cam.Failures >= 3 && !cam.OfflineAlert && now.Sub(cam.LastAlertAt) > 60*time.Second {
-			cam.OfflineAlert = true
-			alert := m.emitAlert(cam, "camera_offline", 85, "camera fetch failed 3+ consecutive times", nil, now, cfg)
-			m.publishAlert(alert)
-		}
+		m.handleCameraFetchError(cam, now, cfg, err)
 		return
 	}
-	cam.Failures = 0
-	cam.OfflineAlert = false
-	cam.LastError = ""
+	m.resetCameraHealth(cam)
 
 	grid, err := sampleSmallGray(imgRaw, 64, 36)
 	if err != nil {
@@ -537,17 +535,7 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 	cam.Frames = append(cam.Frames, frame)
 	cam.Frames = trimFrames(cam.Frames, cfg.BufferDuration, now)
 
-	processedRaw, err := buildProcessedFrame(imgRaw, metrics)
-	if err == nil {
-		liveURL, processedURL, persistErr := m.persistLiveFrames(cam.Meta.ID, imgRaw, processedRaw)
-		if persistErr == nil {
-			m.updateCameraView(cam, metrics, liveURL, processedURL, nil)
-		} else {
-			m.updateCameraView(cam, metrics, "", "", persistErr)
-		}
-	} else {
-		m.updateCameraView(cam, metrics, "", "", err)
-	}
+	m.refreshCameraView(cam, imgRaw, metrics)
 
 	if cam.Pending != nil {
 		cam.Pending.Frames = append(cam.Pending.Frames, frame)
@@ -576,6 +564,39 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 		PostUntil: now.Add(cfg.PostEventDuration),
 		Frames:    append([]frameSnapshot{}, pre...),
 	}
+}
+
+func (m *pipelineManager) handleCameraFetchError(cam *cameraState, now time.Time, cfg pipelineConfig, err error) {
+	cam.Failures++
+	cam.LastError = err.Error()
+	m.updateCameraView(cam, frameMetrics{At: now}, "", "", err)
+
+	if cam.Failures >= 3 && !cam.OfflineAlert && now.Sub(cam.LastAlertAt) > 60*time.Second {
+		cam.OfflineAlert = true
+		alert := m.emitAlert(cam, "camera_offline", 85, "camera fetch failed 3+ consecutive times", nil, now, cfg)
+		m.publishAlert(alert)
+	}
+}
+
+func (m *pipelineManager) resetCameraHealth(cam *cameraState) {
+	cam.Failures = 0
+	cam.OfflineAlert = false
+	cam.LastError = ""
+}
+
+func (m *pipelineManager) refreshCameraView(cam *cameraState, raw []byte, metrics frameMetrics) {
+	processedRaw, err := buildProcessedFrame(raw, metrics)
+	if err != nil {
+		m.updateCameraView(cam, metrics, "", "", err)
+		return
+	}
+
+	liveURL, processedURL, persistErr := m.persistLiveFrames(cam.Meta.ID, raw, processedRaw)
+	if persistErr != nil {
+		m.updateCameraView(cam, metrics, "", "", persistErr)
+		return
+	}
+	m.updateCameraView(cam, metrics, liveURL, processedURL, nil)
 }
 
 func (m *pipelineManager) updateCameraView(cam *cameraState, metrics frameMetrics, liveURL, processedURL string, viewErr error) {
@@ -747,18 +768,62 @@ func framesSince(frames []frameSnapshot, from time.Time) []frameSnapshot {
 	return out
 }
 
+type signalStats struct {
+	currentMotion    float64
+	currentOccupancy float64
+	avgMotion        float64
+	avgOccupancy     float64
+	lowMotionFrames  int
+	highOccFrames    int
+	occSlope         float64
+}
+
 func evaluateSignals(frames []frameSnapshot) (eventType string, score float64, reason string, ok bool) {
-	if len(frames) < 8 {
+	stats, ok := computeSignalStats(frames)
+	if !ok {
 		return "", 0, "", false
+	}
+
+	candidates := []struct {
+		name  string
+		score float64
+	}{
+		{name: "stopped_vehicle", score: stoppedVehicleScore(stats)},
+		{name: "congestion_spike", score: congestionScore(stats)},
+		{name: "queue_growth", score: queueGrowthScore(stats)},
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	best := candidates[0]
+	if best.score < 55 {
+		return "", 0, "", false
+	}
+	reason = fmt.Sprintf(
+		"motion=%.3f avg_motion=%.3f occupancy=%.3f avg_occupancy=%.3f occ_slope=%.3f",
+		stats.currentMotion,
+		stats.avgMotion,
+		stats.currentOccupancy,
+		stats.avgOccupancy,
+		stats.occSlope,
+	)
+	return best.name, best.score, reason, true
+}
+
+func computeSignalStats(frames []frameSnapshot) (signalStats, bool) {
+	if len(frames) < 8 {
+		return signalStats{}, false
 	}
 	window := frames
 	if len(window) > 15 {
 		window = window[len(window)-15:]
 	}
-	var motionVals, occVals []float64
+	motionVals := make([]float64, 0, len(window))
+	occVals := make([]float64, 0, len(window))
 	for _, f := range window {
 		motionVals = append(motionVals, f.Metrics.Motion)
 		occVals = append(occVals, f.Metrics.Occupancy)
+	}
+	if len(motionVals) == 0 || len(occVals) == 0 {
+		return signalStats{}, false
 	}
 	avgMotion := meanFloat(motionVals)
 	avgOcc := meanFloat(occVals)
@@ -769,57 +834,57 @@ func evaluateSignals(frames []frameSnapshot) (eventType string, score float64, r
 	highOccFrames := countWhere(window, func(f frameSnapshot) bool {
 		return f.Metrics.Occupancy > avgOcc+0.05
 	})
-	occSlope := occVals[len(occVals)-1] - occVals[0]
+	return signalStats{
+		currentMotion:    current.Motion,
+		currentOccupancy: current.Occupancy,
+		avgMotion:        avgMotion,
+		avgOccupancy:     avgOcc,
+		lowMotionFrames:  lowMotionFrames,
+		highOccFrames:    highOccFrames,
+		occSlope:         occVals[len(occVals)-1] - occVals[0],
+	}, true
+}
 
-	stoppedScore := 0.0
-	if lowMotionFrames >= 6 {
-		stoppedScore += 45
+func stoppedVehicleScore(stats signalStats) float64 {
+	score := 0.0
+	if stats.lowMotionFrames >= 6 {
+		score += 45
 	}
-	if highOccFrames >= 6 {
-		stoppedScore += 35
+	if stats.highOccFrames >= 6 {
+		score += 35
 	}
-	if current.Motion < 0.02 {
-		stoppedScore += 15
+	if stats.currentMotion < 0.02 {
+		score += 15
 	}
+	return score
+}
 
-	congestionScore := 0.0
-	if current.Occupancy > avgOcc+0.08 {
-		congestionScore += 45
+func congestionScore(stats signalStats) float64 {
+	score := 0.0
+	if stats.currentOccupancy > stats.avgOccupancy+0.08 {
+		score += 45
 	}
-	if occSlope > 0.10 {
-		congestionScore += 30
+	if stats.occSlope > 0.10 {
+		score += 30
 	}
-	if current.Motion < avgMotion*0.8 {
-		congestionScore += 20
+	if stats.currentMotion < stats.avgMotion*0.8 {
+		score += 20
 	}
+	return score
+}
 
-	queueScore := 0.0
-	if occSlope > 0.14 {
-		queueScore += 45
+func queueGrowthScore(stats signalStats) float64 {
+	score := 0.0
+	if stats.occSlope > 0.14 {
+		score += 45
 	}
-	if highOccFrames >= 7 {
-		queueScore += 30
+	if stats.highOccFrames >= 7 {
+		score += 30
 	}
-	if lowMotionFrames >= 5 {
-		queueScore += 20
+	if stats.lowMotionFrames >= 5 {
+		score += 20
 	}
-
-	type candidate struct {
-		name  string
-		score float64
-	}
-	candidates := []candidate{
-		{name: "stopped_vehicle", score: stoppedScore},
-		{name: "congestion_spike", score: congestionScore},
-		{name: "queue_growth", score: queueScore},
-	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
-	best := candidates[0]
-	if best.score < 55 {
-		return "", 0, "", false
-	}
-	reason = fmt.Sprintf("motion=%.3f avg_motion=%.3f occupancy=%.3f avg_occupancy=%.3f occ_slope=%.3f", current.Motion, avgMotion, current.Occupancy, avgOcc, occSlope)
-	return best.name, best.score, reason, true
+	return score
 }
 
 func sampleSmallGray(raw []byte, w, h int) ([]uint8, error) {
@@ -1002,56 +1067,4 @@ func drawBorder(img *image.RGBA, b image.Rectangle, thickness int, c color.RGBA)
 	fillRect(img, b.Min.X, b.Max.Y-thickness, b.Dx(), thickness, c)
 	fillRect(img, b.Min.X, b.Min.Y, thickness, b.Dy(), c)
 	fillRect(img, b.Max.X-thickness, b.Min.Y, thickness, b.Dy(), c)
-}
-
-func meanFloat(v []float64) float64 {
-	if len(v) == 0 {
-		return 0
-	}
-	sum := 0.0
-	for _, x := range v {
-		sum += x
-	}
-	return sum / float64(len(v))
-}
-
-func countWhere(frames []frameSnapshot, fn func(frameSnapshot) bool) int {
-	n := 0
-	for _, f := range frames {
-		if fn(f) {
-			n++
-		}
-	}
-	return n
-}
-
-func maxFloat(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func clamp(v, lo, hi float64) float64 {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
 }

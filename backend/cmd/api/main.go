@@ -11,7 +11,6 @@ import (
 	"net/http/cookiejar"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +21,25 @@ const (
 	defaultBaseURL     = "https://511ny.org"
 	defaultArtifactDir = "./artifacts"
 	defaultUserAgent   = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+
+	defaultRecommendedCameraCount = 10
+	minRecommendedCameraCount     = 5
+	maxRecommendedCameraCount     = 10
+
+	defaultFocusFPS = 30
+	minFocusFPS     = 1
+	maxFocusFPS     = 30
+
+	defaultListLength = 25
+	minListLength     = 1
+	maxListLength     = 100
+
+	defaultAlertListLimit = 50
+	minAlertListLimit     = 1
+	maxAlertListLimit     = 200
 )
+
+var targetCorridors = []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"}
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -59,8 +76,8 @@ func main() {
 		defer cancel()
 
 		start := intQuery(r, "start", 0)
-		length := intQuery(r, "length", 25)
-		if length < 1 || length > 100 {
+		length := boundedIntQuery(r, "length", defaultListLength, minListLength, maxListLength)
+		if length < minListLength || length > maxListLength {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "length must be between 1 and 100"})
 			return
 		}
@@ -79,8 +96,8 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 
-		count := intQuery(r, "count", 10)
-		if count < 5 || count > 10 {
+		count := boundedIntQuery(r, "count", defaultRecommendedCameraCount, minRecommendedCameraCount, maxRecommendedCameraCount)
+		if count < minRecommendedCameraCount || count > maxRecommendedCameraCount {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "count must be between 5 and 10"})
 			return
 		}
@@ -97,7 +114,7 @@ func main() {
 			"count":           len(recommended),
 			"requested_count": count,
 			"live_validated":  true,
-			"targets":         []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"},
+			"targets":         targetCorridors,
 			"data":            recommended,
 		})
 	}))
@@ -199,25 +216,17 @@ func main() {
 			mode = "processed"
 		}
 
-		fps := intQuery(r, "fps", 30)
-		if fps < 1 {
-			fps = 1
-		}
-		if fps > 30 {
-			fps = 30
+		if !pipeline.HasCamera(cameraID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "camera not active in current pipeline"})
+			return
 		}
 
+		fps := boundedIntQuery(r, "fps", defaultFocusFPS, minFocusFPS, maxFocusFPS)
 		pipeline.StreamFocus(w, r, cameraID, mode, fps)
 	})
 
 	mux.HandleFunc("/api/v1/alerts", withCORS(func(w http.ResponseWriter, r *http.Request) {
-		limit := intQuery(r, "limit", 50)
-		if limit < 1 {
-			limit = 1
-		}
-		if limit > 200 {
-			limit = 200
-		}
+		limit := boundedIntQuery(r, "limit", defaultAlertListLimit, minAlertListLimit, maxAlertListLimit)
 		alerts := pipeline.ListAlerts(limit)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"count": len(alerts),
@@ -557,126 +566,10 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 	return selected
 }
 
-func fetchAllCameras(ctx context.Context, client *ny511Client, pageSize, maxRecords int) ([]camera, error) {
-	if pageSize < 1 {
-		pageSize = 200
-	}
-	if maxRecords < pageSize {
-		maxRecords = pageSize
-	}
-	start := 0
-	all := make([]camera, 0, pageSize*2)
-	for {
-		payload, err := client.listCameras(ctx, start, pageSize)
-		if err != nil {
-			return nil, fmt.Errorf("fetch cameras page start=%d: %w", start, err)
-		}
-		all = append(all, payload.Data...)
-		start += pageSize
-		if len(payload.Data) == 0 || start >= payload.RecordsFiltered || len(all) >= maxRecords {
-			break
-		}
-	}
-	return all, nil
-}
-
-func selectLiveRecommended(ctx context.Context, client *ny511Client, cameras []camera, count int) []scoredCamera {
-	if count <= 0 {
-		return nil
-	}
-	ranked := recommendCameras(cameras, len(cameras))
-	out := make([]scoredCamera, 0, count)
-	seen := make(map[int]struct{}, count)
-	for _, cam := range ranked {
-		if len(out) >= count {
-			break
-		}
-		if _, exists := seen[cam.ID]; exists {
-			continue
-		}
-		if len(cam.Images) == 0 {
-			continue
-		}
-		feed := cam.Images[0]
-		if !client.streamLooksLive(ctx, feed.VideoURL) {
-			continue
-		}
-		out = append(out, cam)
-		seen[cam.ID] = struct{}{}
-	}
-	return out
-}
-
 func envOrDefault(key, fallback string) string {
 	v := strings.TrimSpace(os.Getenv(key))
 	if v == "" {
 		return fallback
 	}
 	return v
-}
-
-func intQuery(r *http.Request, key string, fallback int) int {
-	raw := strings.TrimSpace(r.URL.Query().Get(key))
-	if raw == "" {
-		return fallback
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return fallback
-	}
-	return v
-}
-
-func withCORS(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next(w, r)
-	}
-}
-
-func withCORSHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func writeJSON(w http.ResponseWriter, code int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func decodeJSONBody(r *http.Request, out any) error {
-	if r.Body == nil {
-		return nil
-	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("invalid request body: %w", err)
-	}
-	return nil
-}
-
-func corridorForRoadway(roadway string) string {
-	candidates := []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"}
-	for _, c := range candidates {
-		if strings.Contains(roadway, c) {
-			return c
-		}
-	}
-	return ""
 }
