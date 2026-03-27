@@ -6,6 +6,7 @@ help:
 	@echo "Targets:"
 	@echo "  make setup         Install frontend + detector dependencies"
 	@echo "  make dev           Run backend + frontend + detector together"
+	@echo "                     (use 'make dev' — there is no 'make run' target)"
 	@echo "  make dev-stop      Stop dev services on ports 8080/8090/5173"
 	@echo "  make dev-backend   Run Go backend only"
 	@echo "  make dev-frontend  Run React frontend only"
@@ -25,8 +26,10 @@ setup-detector:
 	fi; \
 	if [ -x ".venv/bin/python" ]; then \
 		.venv/bin/python -m pip install -r detector_spike/requirements.txt || true; \
-	fi; \
-	python3 -m pip install --user --break-system-packages -r detector_spike/requirements.txt
+	fi
+
+# Note: do not pass --break-system-packages here; older pip (e.g. macOS Xcode python3)
+# does not support that flag. Detector deps are installed into .venv only.
 
 dev-backend:
 	cd backend && go run ./cmd/api
@@ -64,4 +67,7 @@ dev:
 	DETECTOR_PY="python3"; \
 	if [ -x ".venv/bin/python" ] && .venv/bin/python -c "import uvicorn" >/dev/null 2>&1; then DETECTOR_PY=".venv/bin/python"; fi; \
 	( PYTHONPATH="$$(pwd)" $$DETECTOR_PY -m uvicorn detector_spike.app:app --host 0.0.0.0 --port 8090 ) & \
-	wait -n
+	wait
+
+# Note: macOS ships Bash 3.2, which does not support `wait -n` (Bash 4.3+).
+# Plain `wait` blocks until all background jobs exit (Ctrl+C triggers trap cleanup).
