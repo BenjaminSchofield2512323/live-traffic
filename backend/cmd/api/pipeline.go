@@ -110,6 +110,7 @@ type cameraLiveView struct {
 	Roadway           string    `json:"roadway"`
 	Direction         string    `json:"direction"`
 	StreamURL         string    `json:"stream_url"`
+	SourceImageURL    string    `json:"source_image_url,omitempty"`
 	LiveImageURL      string    `json:"live_image_url"`
 	ProcessedImageURL string    `json:"processed_image_url"`
 	LastFrameAt       time.Time `json:"last_frame_at,omitempty"`
@@ -216,18 +217,21 @@ func (m *pipelineManager) Start(ctx context.Context, cfg pipelineConfig) error {
 	m.views = make(map[int]cameraLiveView, len(cams))
 	for _, cam := range cams {
 		streamURL := ""
+		srcImg := ""
 		if len(cam.Meta.Images) > 0 {
 			streamURL = cam.Meta.Images[0].VideoURL
+			srcImg = cam.Meta.Images[0].ImageURL
 		}
 		m.views[cam.Meta.ID] = cameraLiveView{
-			CameraID:    cam.Meta.ID,
-			Location:    cam.Meta.Location,
-			Roadway:     cam.Meta.Roadway,
-			Direction:   cam.Meta.Direction,
-			StreamURL:   streamURL,
-			Failures:    0,
-			LastError:   "",
-			LastFrameAt: time.Time{},
+			CameraID:       cam.Meta.ID,
+			Location:       cam.Meta.Location,
+			Roadway:        cam.Meta.Roadway,
+			Direction:      cam.Meta.Direction,
+			StreamURL:      streamURL,
+			SourceImageURL: srcImg,
+			Failures:       0,
+			LastError:      "",
+			LastFrameAt:    time.Time{},
 		}
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -298,11 +302,67 @@ func (m *pipelineManager) ListCameraViews() []cameraLiveView {
 }
 
 func (m *pipelineManager) StreamFocus(w http.ResponseWriter, r *http.Request, cameraID int, streamType string, fps int) {
-	sType := mjpegStreamType(strings.ToLower(strings.TrimSpace(streamType)))
+	st := strings.ToLower(strings.TrimSpace(streamType))
+	if st == "raw" {
+		st = "live"
+	}
+	sType := mjpegStreamType(st)
 	if sType != streamTypeLive && sType != streamTypeProcessed {
 		sType = streamTypeProcessed
 	}
 	m.serveMJPEG(w, r, cameraID, sType, fps)
+}
+
+// WriteFocusSnapshot returns one JPEG for UI polling when <img> cannot animate MJPEG
+// (Chrome). Both modes fetch the latest 511 snapshot and, for processed, draw the overlay.
+func (m *pipelineManager) WriteFocusSnapshot(ctx context.Context, w http.ResponseWriter, cameraID int, mode string) {
+	st := strings.ToLower(strings.TrimSpace(mode))
+	if st == "raw" {
+		st = "live"
+	}
+	sType := mjpegStreamType(st)
+	if sType != streamTypeLive && sType != streamTypeProcessed {
+		sType = streamTypeProcessed
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	url := m.snapshotImageURLForCamera(cameraID)
+	if url == "" {
+		http.Error(w, "unknown camera", http.StatusNotFound)
+		return
+	}
+	raw, err := m.client.fetchCameraImageFresh(ctx, url)
+	if err != nil || len(raw) == 0 {
+		http.Error(w, "snapshot fetch failed", http.StatusBadGateway)
+		return
+	}
+
+	if sType == streamTypeLive {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+		return
+	}
+
+	metrics := frameMetrics{At: time.Now().UTC()}
+	if grid, gErr := sampleSmallGray(raw, 64, 36); gErr == nil {
+		metrics.Motion, metrics.Occupancy = deriveMetrics(nil, grid, 64, 36)
+	}
+	out, pErr := buildProcessedFrame(raw, metrics)
+	if pErr != nil || len(out) == 0 {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
 }
 
 func (m *pipelineManager) serveMJPEG(w http.ResponseWriter, r *http.Request, cameraID int, streamType mjpegStreamType, fps int) {
@@ -325,7 +385,7 @@ func (m *pipelineManager) serveMJPEG(w http.ResponseWriter, r *http.Request, cam
 	if fetchInterval > 1500*time.Millisecond {
 		fetchInterval = 1500 * time.Millisecond
 	}
-	imageURL := m.cameraImageURLByID(cameraID)
+	imageURL := m.snapshotImageURLForCamera(cameraID)
 
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -364,7 +424,7 @@ func (m *pipelineManager) serveMJPEG(w http.ResponseWriter, r *http.Request, cam
 					fetchTimeout = 3 * time.Second
 				}
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
-				raw, err := m.client.fetchCameraImage(fetchCtx, imageURL)
+				raw, err := m.client.fetchCameraImageFresh(fetchCtx, imageURL)
 				cancel()
 				if err == nil && len(raw) > 0 {
 					lastFetch = now
@@ -447,6 +507,22 @@ func (m *pipelineManager) cameraImageURLByID(cameraID int) string {
 	return ""
 }
 
+// snapshotImageURLForCamera resolves the 511 snapshot image URL for focus/snapshot.
+// It prefers the in-memory pipeline camera list, then the view map (covers races before
+// the first artifact write).
+func (m *pipelineManager) snapshotImageURLForCamera(cameraID int) string {
+	if u := m.cameraImageURLByID(cameraID); u != "" {
+		return u
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.views[cameraID]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v.SourceImageURL)
+}
+
 func (m *pipelineManager) fetchPipelineCameras(ctx context.Context, count int) ([]*cameraState, error) {
 	pageSize := 200
 	start := 0
@@ -509,7 +585,7 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 		return
 	}
 	feed := cam.Meta.Images[0]
-	imgRaw, err := m.client.fetchCameraImage(ctx, feed.ImageURL)
+	imgRaw, err := m.client.fetchCameraImageFresh(ctx, feed.ImageURL)
 	if err != nil {
 		cam.Failures++
 		cam.LastError = err.Error()
@@ -591,7 +667,11 @@ func (m *pipelineManager) updateCameraView(cam *cameraState, metrics frameMetric
 		}
 		if len(cam.Meta.Images) > 0 {
 			view.StreamURL = cam.Meta.Images[0].VideoURL
+			view.SourceImageURL = cam.Meta.Images[0].ImageURL
 		}
+	}
+	if view.SourceImageURL == "" && len(cam.Meta.Images) > 0 {
+		view.SourceImageURL = cam.Meta.Images[0].ImageURL
 	}
 	view.LastFrameAt = metrics.At
 	view.Motion = metrics.Motion

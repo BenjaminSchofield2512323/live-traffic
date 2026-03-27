@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
+import { FocusStreamFrames } from './FocusStreamFrames.jsx'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 
@@ -21,6 +22,12 @@ function App() {
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [focusFPS, setFocusFPS] = useState(30)
+  /** Motion/occupancy from client-side frame diff on the HLS decode (same heuristics as API). */
+  const [streamClientMetrics, setStreamClientMetrics] = useState(null)
+
+  const onStreamFrameMetrics = useCallback((m) => {
+    setStreamClientMetrics(m)
+  }, [])
 
   const totalFeeds = useMemo(() => recommended.length, [recommended])
   const totalAlerts = useMemo(() => alerts.length, [alerts])
@@ -162,6 +169,10 @@ function App() {
     [cameraViews, focusCameraID],
   )
 
+  useEffect(() => {
+    setStreamClientMetrics(null)
+  }, [focusCameraID, focusedView?.stream_url])
+
   return (
     <main className="app">
       <header className="header">
@@ -241,7 +252,7 @@ function App() {
               ))}
             </select>
             <label className="fpsLabel">
-              FPS
+              Target FPS
               <input
                 type="number"
                 min="1"
@@ -258,39 +269,32 @@ function App() {
         </div>
         {focusedView ? (
           <>
-            <div className="focusGrid">
-              <div className="focusCard">
-                <h3>Live frame</h3>
-                {focusedView.live_image_url ? (
-                  <img
-                    src={`${apiBase}/api/v1/focus/stream?camera_id=${focusedView.camera_id}&mode=raw&fps=${focusFPS}`}
-                    alt="live camera frame"
-                  />
-                ) : (
-                  <p>No frame yet</p>
-                )}
-              </div>
-              <div className="focusCard">
-                <h3>Processed frame</h3>
-                {focusedView.processed_image_url ? (
-                  <img
-                    src={`${apiBase}/api/v1/focus/stream?camera_id=${focusedView.camera_id}&mode=processed&fps=${focusFPS}`}
-                    alt="processed camera frame"
-                  />
-                ) : (
-                  <p>No processed frame yet</p>
-                )}
-              </div>
-            </div>
+            {focusedView.stream_url ? (
+              <FocusStreamFrames
+                key={`${focusCameraID}-${focusedView.stream_url}`}
+                streamUrl={focusedView.stream_url}
+                fps={focusFPS}
+                onFrameMetrics={onStreamFrameMetrics}
+              />
+            ) : (
+              <p className="focusPlaceholder">
+                No HLS <code>stream_url</code> for this camera. Start the pipeline and pick a feed with video.
+              </p>
+            )}
             <p>
               <strong>Camera:</strong> {focusedView.roadway} | <strong>Location:</strong>{' '}
               {focusedView.location}
             </p>
             <p>
-              <strong>Motion:</strong> {focusedView.motion?.toFixed(4) ?? '0.0000'} |{' '}
-              <strong>Occupancy:</strong> {focusedView.occupancy?.toFixed(4) ?? '0.0000'} |{' '}
-              <strong>Failures:</strong> {focusedView.failures}
+              <strong>Pipeline (snapshots):</strong> motion {focusedView.motion?.toFixed(4) ?? '0.0000'} | occupancy{' '}
+              {focusedView.occupancy?.toFixed(4) ?? '0.0000'} | failures {focusedView.failures}
             </p>
+            {streamClientMetrics && (
+              <p className="focusMeta">
+                <strong>Stream frames (client, {focusFPS} fps target):</strong> motion{' '}
+                {streamClientMetrics.motion.toFixed(4)} | occupancy {streamClientMetrics.occupancy.toFixed(4)}
+              </p>
+            )}
             {focusedView.stream_url && (
               <p>
                 <a href={focusedView.stream_url} target="_blank" rel="noreferrer">
