@@ -254,9 +254,7 @@ export function FocusStreamFrames({
           const bw = Math.max(1, (x2 - x1) * sx)
           const bh = Math.max(1, (y2 - y1) * sy)
           procCtx.strokeRect(bx, by, bw, bh)
-          const lane =
-            d.lane_id != null && String(d.lane_id).trim() !== '' ? `${String(d.lane_id)} ` : ''
-          const tag = `${lane}${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
+          const tag = `${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
           procCtx.fillText(tag, bx + 2, Math.max(12, by - 3))
         })
       }

@@ -327,6 +327,37 @@ def _parse_lanes_json(raw_lanes: str, width: int, height: int) -> list[LaneDef]:
     return out
 
 
+def _default_lane_defs(width: int, height: int, lane_count: int = 4) -> list[LaneDef]:
+    """
+    Build visible fallback lane polygons when no camera-specific lane config exists.
+    This is an approximation for UI visualization only (not calibrated geometry).
+    """
+    lane_count = max(2, min(6, lane_count))
+    y_top = int(height * 0.42)
+    y_bottom = height - 1
+    x_mid = width / 2.0
+    # Narrower road width near horizon, wider near bottom to mimic perspective.
+    top_half_w = width * 0.18
+    bot_half_w = width * 0.45
+
+    top_left = x_mid - top_half_w
+    top_right = x_mid + top_half_w
+    bot_left = x_mid - bot_half_w
+    bot_right = x_mid + bot_half_w
+
+    lanes: list[LaneDef] = []
+    for i in range(lane_count):
+        f0 = i / lane_count
+        f1 = (i + 1) / lane_count
+        p1 = [int(top_left + (top_right - top_left) * f0), y_top]
+        p2 = [int(top_left + (top_right - top_left) * f1), y_top]
+        p3 = [int(bot_left + (bot_right - bot_left) * f1), y_bottom]
+        p4 = [int(bot_left + (bot_right - bot_left) * f0), y_bottom]
+        poly = np.array([p1, p2, p3, p4], dtype=np.int32)
+        lanes.append(LaneDef(lane_id=f"lane_{i+1}", polygon=poly))
+    return lanes
+
+
 def _resolve_geometry(
     stream_id: str,
     width: int,
@@ -375,7 +406,7 @@ def _resolve_geometry(
         lanes = query_lanes
 
     if not lanes:
-        lanes = [LaneDef(lane_id="road", polygon=road_polygon)]
+        lanes = _default_lane_defs(width=width, height=height, lane_count=4)
 
     return Geometry(road_polygon=road_polygon, direction=direction, lanes=lanes)
 
