@@ -82,6 +82,7 @@ export function FocusStreamFrames({
   streamUrl,
   fps,
   detectorFPS = 2,
+  lanePolygons = null,
   cameraID,
   apiBase,
   onFrameMetrics,
@@ -116,7 +117,7 @@ export function FocusStreamFrames({
     detectInflightRef.current = false
     lastDetectAtRef.current = 0
     detectionCbRef.current?.(null)
-  }, [streamUrl, cameraID])
+  }, [streamUrl, cameraID, lanePolygons])
 
   useEffect(() => {
     const video = videoRef.current
@@ -274,7 +275,16 @@ export function FocusStreamFrames({
           }
           try {
             const bytes = await blob.arrayBuffer()
-            const url = `${apiBase}/api/v1/pipeline/focus/detect?camera_id=${cameraID}&stream_id=cam-${cameraID}&imgsz=640&conf=0.25`
+            const params = new URLSearchParams({
+              camera_id: String(cameraID),
+              stream_id: `cam-${cameraID}`,
+              imgsz: '640',
+              conf: '0.25',
+            })
+            if (Array.isArray(lanePolygons) && lanePolygons.length > 0) {
+              params.set('lanes', JSON.stringify(lanePolygons))
+            }
+            const url = `${apiBase}/api/v1/pipeline/focus/detect?${params.toString()}`
             const resp = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/octet-stream' },
@@ -303,7 +313,7 @@ export function FocusStreamFrames({
       cancelAnimationFrame(rafRef.current)
       prevGrayRef.current = null
     }
-  }, [fps, detectorFPS, streamUrl, cameraID, apiBase])
+  }, [fps, detectorFPS, streamUrl, cameraID, apiBase, lanePolygons])
 
   return (
     <div className="focusStreamFrames">
