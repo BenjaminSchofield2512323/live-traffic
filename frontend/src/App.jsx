@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
+const focusRefreshIntervalMs = 2000
 
 function buildImageURL(path) {
   if (!path) return ''
@@ -61,6 +62,13 @@ function App() {
 
   useEffect(() => {
     loadDashboard()
+  }, [])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setFocusCacheBust(Date.now())
+    }, focusRefreshIntervalMs)
+    return () => window.clearInterval(timer)
   }, [])
 
   return (
