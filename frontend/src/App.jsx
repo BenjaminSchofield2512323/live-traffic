@@ -9,8 +9,6 @@ const apiBase =
   import.meta.env.DEV && import.meta.env.VITE_DEV_DIRECT_API !== '1'
     ? ''
     : import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
-const focusRefreshIntervalMs = 2000
-
 function buildImageURL(path) {
   if (!path) return ''
   if (path.startsWith('http://') || path.startsWith('https://')) return path
@@ -38,7 +36,6 @@ function App() {
     stoppedLike: false,
     meanSmoothedSpeedPxS: 0,
   })
-  const [focusCacheBust, setFocusCacheBust] = useState(Date.now())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
@@ -220,24 +217,6 @@ function App() {
     [cameraViews, focusCameraID],
   )
 
-  const focusLiveSrc = useMemo(() => {
-    if (!focusCameraID) return ''
-    return `${apiBase}/api/v1/pipeline/focus/snapshot?camera_id=${focusCameraID}&mode=live&_=${focusCacheBust}`
-  }, [focusCameraID, focusCacheBust])
-
-  const focusProcessedSrc = useMemo(() => {
-    if (!focusCameraID) return ''
-    return `${apiBase}/api/v1/pipeline/focus/snapshot?camera_id=${focusCameraID}&mode=processed&_=${focusCacheBust}`
-  }, [focusCameraID, focusCacheBust])
-
-  useEffect(() => {
-    if (!focusCameraID) return undefined
-    const id = window.setInterval(() => {
-      setFocusCacheBust(Date.now())
-    }, focusRefreshIntervalMs)
-    return () => window.clearInterval(id)
-  }, [focusCameraID])
-
   useEffect(() => {
     setStreamClientMetrics(null)
     setDetectorMetrics(null)
@@ -359,7 +338,7 @@ function App() {
       <section className="focusPanel" aria-labelledby="focus-heading">
         <div className="focusPanelHeader">
           <h2 id="focus-heading">Focus stream</h2>
-          <p className="focusPanelLead">Pipeline snapshots plus live HLS decode with YOLO overlay.</p>
+          <p className="focusPanelLead">Live HLS decode with YOLO overlay and lane geometry from the detector.</p>
         </div>
         {cameraViews.length > 0 && (
           <div className="focusControls">
@@ -405,23 +384,8 @@ function App() {
           </div>
         )}
         {detectStatus.lastError && <p className="warn">Detector: {detectStatus.lastError}</p>}
-        {focusCameraID ? (
-          <div className="focusSnapshotsRow">
-            <article className="focusCard focusCardSnapshot">
-              <h3>Snapshot · live</h3>
-              <div className="focusSnapshotFrame">
-                <img src={focusLiveSrc} alt="Pipeline raw snapshot" loading="lazy" />
-              </div>
-            </article>
-            <article className="focusCard focusCardSnapshot">
-              <h3>Snapshot · processed</h3>
-              <div className="focusSnapshotFrame">
-                <img src={focusProcessedSrc} alt="Pipeline processed snapshot" loading="lazy" />
-              </div>
-            </article>
-          </div>
-        ) : (
-          <p className="focusPlaceholder">Select a focus camera to poll snapshot JPEGs from the pipeline.</p>
+        {cameraViews.length === 0 && (
+          <p className="focusPlaceholder">Start the pipeline to load focus cameras and streams.</p>
         )}
         {focusedView ? (
           <>
