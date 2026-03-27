@@ -26,6 +26,7 @@ Uses 511NY endpoint flow (same path behind "Show Video"), not HTML scraping:
 - `POST /api/v1/pipeline/start`
 - `POST /api/v1/pipeline/stop`
 - `GET /api/v1/pipeline/status`
+- `GET /api/v1/pipeline/cameras`
 - `GET /api/v1/alerts?limit=100`
 - `GET /artifacts/...` (evidence files)
 
@@ -65,6 +66,9 @@ Fetch alert feed:
 
 ```bash
 curl "http://localhost:8080/api/v1/alerts?limit=20"
+
+# Camera live-processing views (raw + processed frame URLs)
+curl "http://localhost:8080/api/v1/pipeline/cameras"
 ```
 
 Stop pipeline:

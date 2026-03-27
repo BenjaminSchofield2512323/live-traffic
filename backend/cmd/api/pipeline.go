@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/color/palette"
 	"image/draw"
 	"image/gif"
+	"image/jpeg"
 	_ "image/jpeg"
 	_ "image/png"
 	"log/slog"
@@ -96,9 +98,25 @@ type cameraState struct {
 	Frames       []frameSnapshot
 	PrevSmall    []uint8
 	Failures     int
+	LastError    string
 	LastAlertAt  time.Time
 	Pending      *pendingCapture
 	OfflineAlert bool
+}
+
+type cameraLiveView struct {
+	CameraID          int       `json:"camera_id"`
+	Location          string    `json:"location"`
+	Roadway           string    `json:"roadway"`
+	Direction         string    `json:"direction"`
+	StreamURL         string    `json:"stream_url"`
+	LiveImageURL      string    `json:"live_image_url"`
+	ProcessedImageURL string    `json:"processed_image_url"`
+	LastFrameAt       time.Time `json:"last_frame_at,omitempty"`
+	Motion            float64   `json:"motion"`
+	Occupancy         float64   `json:"occupancy"`
+	Failures          int       `json:"failures"`
+	LastError         string    `json:"last_error,omitempty"`
 }
 
 type incidentAlert struct {
@@ -144,6 +162,7 @@ type pipelineManager struct {
 	lastTick time.Time
 	config   pipelineConfig
 	cameras  []*cameraState
+	views    map[int]cameraLiveView
 	alerts   []incidentAlert
 	cancel   context.CancelFunc
 }
@@ -159,6 +178,7 @@ func newPipelineManager(logger *slog.Logger, client *ny511Client, artifactDir, w
 		webhookURL:  strings.TrimSpace(webhookURL),
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		alerts:      make([]incidentAlert, 0, 200),
+		views:       make(map[int]cameraLiveView, 64),
 	}, nil
 }
 
@@ -186,6 +206,23 @@ func (m *pipelineManager) Start(ctx context.Context, cfg pipelineConfig) error {
 	m.lastTick = time.Time{}
 	m.config = cfg
 	m.cameras = cams
+	m.views = make(map[int]cameraLiveView, len(cams))
+	for _, cam := range cams {
+		streamURL := ""
+		if len(cam.Meta.Images) > 0 {
+			streamURL = cam.Meta.Images[0].VideoURL
+		}
+		m.views[cam.Meta.ID] = cameraLiveView{
+			CameraID:    cam.Meta.ID,
+			Location:    cam.Meta.Location,
+			Roadway:     cam.Meta.Roadway,
+			Direction:   cam.Meta.Direction,
+			StreamURL:   streamURL,
+			Failures:    0,
+			LastError:   "",
+			LastFrameAt: time.Time{},
+		}
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
@@ -237,6 +274,22 @@ func (m *pipelineManager) ListAlerts(limit int) []incidentAlert {
 	return out
 }
 
+func (m *pipelineManager) ListCameraViews() []cameraLiveView {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]cameraLiveView, 0, len(m.views))
+	for _, v := range m.views {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LastFrameAt.Equal(out[j].LastFrameAt) {
+			return out[i].CameraID < out[j].CameraID
+		}
+		return out[i].LastFrameAt.After(out[j].LastFrameAt)
+	})
+	return out
+}
+
 func (m *pipelineManager) fetchPipelineCameras(ctx context.Context, count int) ([]*cameraState, error) {
 	pageSize := 200
 	start := 0
@@ -252,7 +305,7 @@ func (m *pipelineManager) fetchPipelineCameras(ctx context.Context, count int) (
 			break
 		}
 	}
-	selected := recommendCameras(all, count)
+	selected := selectLiveRecommended(ctx, m.client, all, count)
 	out := make([]*cameraState, 0, len(selected))
 	for _, cam := range selected {
 		out = append(out, &cameraState{Meta: cam, Frames: make([]frameSnapshot, 0, 100)})
@@ -302,6 +355,8 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 	imgRaw, err := m.client.fetchCameraImage(ctx, feed.ImageURL)
 	if err != nil {
 		cam.Failures++
+		cam.LastError = err.Error()
+		m.updateCameraView(cam, frameMetrics{At: now}, "", "", err)
 		if cam.Failures >= 3 && !cam.OfflineAlert && now.Sub(cam.LastAlertAt) > 60*time.Second {
 			cam.OfflineAlert = true
 			alert := m.emitAlert(cam, "camera_offline", 85, "camera fetch failed 3+ consecutive times", nil, now, cfg)
@@ -311,6 +366,7 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 	}
 	cam.Failures = 0
 	cam.OfflineAlert = false
+	cam.LastError = ""
 
 	grid, err := sampleSmallGray(imgRaw, 64, 36)
 	if err != nil {
@@ -323,6 +379,18 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 	frame := frameSnapshot{At: now, Raw: imgRaw, Metrics: metrics}
 	cam.Frames = append(cam.Frames, frame)
 	cam.Frames = trimFrames(cam.Frames, cfg.BufferDuration, now)
+
+	processedRaw, err := buildProcessedFrame(imgRaw, metrics)
+	if err == nil {
+		liveURL, processedURL, persistErr := m.persistLiveFrames(cam.Meta.ID, imgRaw, processedRaw)
+		if persistErr == nil {
+			m.updateCameraView(cam, metrics, liveURL, processedURL, nil)
+		} else {
+			m.updateCameraView(cam, metrics, "", "", persistErr)
+		}
+	} else {
+		m.updateCameraView(cam, metrics, "", "", err)
+	}
 
 	if cam.Pending != nil {
 		cam.Pending.Frames = append(cam.Pending.Frames, frame)
@@ -351,6 +419,55 @@ func (m *pipelineManager) processCamera(ctx context.Context, cam *cameraState, c
 		PostUntil: now.Add(cfg.PostEventDuration),
 		Frames:    append([]frameSnapshot{}, pre...),
 	}
+}
+
+func (m *pipelineManager) updateCameraView(cam *cameraState, metrics frameMetrics, liveURL, processedURL string, viewErr error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	view, ok := m.views[cam.Meta.ID]
+	if !ok {
+		view = cameraLiveView{
+			CameraID:  cam.Meta.ID,
+			Location:  cam.Meta.Location,
+			Roadway:   cam.Meta.Roadway,
+			Direction: cam.Meta.Direction,
+		}
+		if len(cam.Meta.Images) > 0 {
+			view.StreamURL = cam.Meta.Images[0].VideoURL
+		}
+	}
+	view.LastFrameAt = metrics.At
+	view.Motion = metrics.Motion
+	view.Occupancy = metrics.Occupancy
+	view.Failures = cam.Failures
+	if liveURL != "" {
+		view.LiveImageURL = liveURL
+	}
+	if processedURL != "" {
+		view.ProcessedImageURL = processedURL
+	}
+	if viewErr != nil {
+		view.LastError = viewErr.Error()
+	} else {
+		view.LastError = ""
+	}
+	m.views[cam.Meta.ID] = view
+}
+
+func (m *pipelineManager) persistLiveFrames(cameraID int, raw, processed []byte) (liveURL, processedURL string, err error) {
+	dir := filepath.Join(m.artifactDir, "live", fmt.Sprintf("cam-%d", cameraID))
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", err
+	}
+	livePath := filepath.Join(dir, "latest.jpg")
+	procPath := filepath.Join(dir, "processed.jpg")
+	if err = os.WriteFile(livePath, raw, 0o644); err != nil {
+		return "", "", err
+	}
+	if err = os.WriteFile(procPath, processed, 0o644); err != nil {
+		return "", "", err
+	}
+	return fmt.Sprintf("/artifacts/live/cam-%d/latest.jpg", cameraID), fmt.Sprintf("/artifacts/live/cam-%d/processed.jpg", cameraID), nil
 }
 
 func (m *pipelineManager) finalizePendingCapture(cam *cameraState, cfg pipelineConfig) *incidentAlert {
@@ -654,6 +771,82 @@ func buildGIF(path string, frames []frameSnapshot) error {
 	return gif.EncodeAll(file, anim)
 }
 
+func buildProcessedFrame(raw []byte, metrics frameMetrics) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	rgba := toRGBA(img)
+	b := rgba.Bounds()
+	if b.Dx() < 20 || b.Dy() < 20 {
+		return nil, errors.New("image too small")
+	}
+
+	overlayH := maxInt(26, b.Dy()/9)
+	fillRect(rgba, b.Min.X, b.Min.Y, b.Dx(), overlayH, color.RGBA{R: 0, G: 0, B: 0, A: 180})
+
+	motionRatio := clamp(metrics.Motion*8, 0, 1)
+	occRatio := clamp(metrics.Occupancy*2.2, 0, 1)
+
+	barW := maxInt(50, b.Dx()/3)
+	barH := maxInt(6, overlayH/4)
+	padding := maxInt(8, b.Dx()/60)
+	top := b.Min.Y + maxInt(6, overlayH/5)
+
+	// motion bar (green)
+	fillRect(rgba, b.Min.X+padding, top, barW, barH, color.RGBA{R: 70, G: 70, B: 70, A: 220})
+	fillRect(rgba, b.Min.X+padding, top, int(float64(barW)*motionRatio), barH, color.RGBA{R: 45, G: 210, B: 80, A: 255})
+
+	// occupancy bar (orange/red)
+	top2 := top + barH + maxInt(4, overlayH/8)
+	fillRect(rgba, b.Min.X+padding, top2, barW, barH, color.RGBA{R: 70, G: 70, B: 70, A: 220})
+	fillRect(rgba, b.Min.X+padding, top2, int(float64(barW)*occRatio), barH, color.RGBA{R: 240, G: 120, B: 20, A: 255})
+
+	// frame border turns red for high occupancy+low motion (incident-like visual)
+	if metrics.Occupancy > 0.24 && metrics.Motion < 0.03 {
+		drawBorder(rgba, b, 4, color.RGBA{R: 230, G: 35, B: 35, A: 255})
+	}
+
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, rgba, &jpeg.Options{Quality: 78}); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func toRGBA(img image.Image) *image.RGBA {
+	b := img.Bounds()
+	dst := image.NewRGBA(b)
+	draw.Draw(dst, b, img, b.Min, draw.Src)
+	return dst
+}
+
+func fillRect(img *image.RGBA, x, y, w, h int, c color.RGBA) {
+	b := img.Bounds()
+	if w <= 0 || h <= 0 {
+		return
+	}
+	x0 := maxInt(x, b.Min.X)
+	y0 := maxInt(y, b.Min.Y)
+	x1 := minInt(x+w, b.Max.X)
+	y1 := minInt(y+h, b.Max.Y)
+	for yy := y0; yy < y1; yy++ {
+		for xx := x0; xx < x1; xx++ {
+			img.SetRGBA(xx, yy, c)
+		}
+	}
+}
+
+func drawBorder(img *image.RGBA, b image.Rectangle, thickness int, c color.RGBA) {
+	if thickness <= 0 {
+		return
+	}
+	fillRect(img, b.Min.X, b.Min.Y, b.Dx(), thickness, c)
+	fillRect(img, b.Min.X, b.Max.Y-thickness, b.Dx(), thickness, c)
+	fillRect(img, b.Min.X, b.Min.Y, thickness, b.Dy(), c)
+	fillRect(img, b.Max.X-thickness, b.Min.Y, thickness, b.Dy(), c)
+}
+
 func meanFloat(v []float64) float64 {
 	if len(v) == 0 {
 		return 0
@@ -687,4 +880,21 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func clamp(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }

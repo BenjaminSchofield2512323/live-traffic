@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -84,18 +85,20 @@ func main() {
 			return
 		}
 
-		payload, err := client.listCameras(ctx, 0, 250)
+		allCameras, err := fetchAllCameras(ctx, client, 200, 2500)
 		if err != nil {
 			logger.Error("list cameras for recommendation failed", "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
 
-		recommended := recommendCameras(payload.Data, count)
+		recommended := selectLiveRecommended(ctx, client, allCameras, count)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"count":   len(recommended),
-			"targets": []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"},
-			"data":    recommended,
+			"count":           len(recommended),
+			"requested_count": count,
+			"live_validated":  true,
+			"targets":         []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"},
+			"data":            recommended,
 		})
 	}))
 
@@ -165,6 +168,13 @@ func main() {
 		writeJSON(w, http.StatusOK, pipeline.Status())
 	}))
 
+	mux.HandleFunc("/api/v1/pipeline/cameras", withCORS(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"count": len(pipeline.ListCameraViews()),
+			"data":  pipeline.ListCameraViews(),
+		})
+	}))
+
 	mux.HandleFunc("/api/v1/alerts", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		limit := intQuery(r, "limit", 50)
 		if limit < 1 {
@@ -196,9 +206,16 @@ func main() {
 }
 
 type ny511Client struct {
-	baseURL    string
-	userAgent  string
-	httpClient *http.Client
+	baseURL     string
+	userAgent   string
+	httpClient  *http.Client
+	streamMu    sync.Mutex
+	streamCache map[string]streamProbeResult
+}
+
+type streamProbeResult struct {
+	OK        bool
+	CheckedAt time.Time
 }
 
 func newNY511Client(baseURL string) (*ny511Client, error) {
@@ -214,6 +231,7 @@ func newNY511Client(baseURL string) (*ny511Client, error) {
 			Timeout: 20 * time.Second,
 			Jar:     jar,
 		},
+		streamCache: make(map[string]streamProbeResult, 256),
 	}, nil
 }
 
@@ -334,6 +352,58 @@ func (c *ny511Client) fetchCameraImage(ctx context.Context, imageURL string) ([]
 	return b, nil
 }
 
+func (c *ny511Client) streamLooksLive(ctx context.Context, streamURL string) bool {
+	if strings.TrimSpace(streamURL) == "" {
+		return false
+	}
+
+	now := time.Now().UTC()
+	c.streamMu.Lock()
+	cached, ok := c.streamCache[streamURL]
+	if ok && now.Sub(cached.CheckedAt) < 2*time.Minute {
+		c.streamMu.Unlock()
+		return cached.OK
+	}
+	c.streamMu.Unlock()
+
+	probeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.cacheStreamProbe(streamURL, false)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		c.cacheStreamProbe(streamURL, false)
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		c.cacheStreamProbe(streamURL, false)
+		return false
+	}
+	text := strings.ToUpper(string(body))
+	ok = strings.Contains(text, "#EXTM3U") || strings.Contains(text, "#EXTINF") || strings.Contains(text, "#EXT-X-STREAM-INF")
+	c.cacheStreamProbe(streamURL, ok)
+	return ok
+}
+
+func (c *ny511Client) cacheStreamProbe(streamURL string, ok bool) {
+	c.streamMu.Lock()
+	c.streamCache[streamURL] = streamProbeResult{OK: ok, CheckedAt: time.Now().UTC()}
+	c.streamMu.Unlock()
+}
+
 type listResponse struct {
 	Draw            int      `json:"draw"`
 	RecordsTotal    int      `json:"recordsTotal"`
@@ -450,6 +520,56 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 		return selected[:count]
 	}
 	return selected
+}
+
+func fetchAllCameras(ctx context.Context, client *ny511Client, pageSize, maxRecords int) ([]camera, error) {
+	if pageSize < 1 {
+		pageSize = 200
+	}
+	if maxRecords < pageSize {
+		maxRecords = pageSize
+	}
+	start := 0
+	all := make([]camera, 0, pageSize*2)
+	for {
+		payload, err := client.listCameras(ctx, start, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("fetch cameras page start=%d: %w", start, err)
+		}
+		all = append(all, payload.Data...)
+		start += pageSize
+		if len(payload.Data) == 0 || start >= payload.RecordsFiltered || len(all) >= maxRecords {
+			break
+		}
+	}
+	return all, nil
+}
+
+func selectLiveRecommended(ctx context.Context, client *ny511Client, cameras []camera, count int) []scoredCamera {
+	if count <= 0 {
+		return nil
+	}
+	ranked := recommendCameras(cameras, len(cameras))
+	out := make([]scoredCamera, 0, count)
+	seen := make(map[int]struct{}, count)
+	for _, cam := range ranked {
+		if len(out) >= count {
+			break
+		}
+		if _, exists := seen[cam.ID]; exists {
+			continue
+		}
+		if len(cam.Images) == 0 {
+			continue
+		}
+		feed := cam.Images[0]
+		if !client.streamLooksLive(ctx, feed.VideoURL) {
+			continue
+		}
+		out = append(out, cam)
+		seen[cam.ID] = struct{}{}
+	}
+	return out
 }
 
 func envOrDefault(key, fallback string) string {

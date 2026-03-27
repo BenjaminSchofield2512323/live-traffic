@@ -147,6 +147,96 @@
   padding: 0.65rem;
 }
 
+.focusWrap {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+
+.focusList {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  max-height: 560px;
+  overflow: auto;
+}
+
+.focusItem {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #e2e8f0;
+  background: #fff;
+  padding: 0.65rem;
+  cursor: pointer;
+}
+
+.focusItem:last-child {
+  border-bottom: 0;
+}
+
+.focusItem.active {
+  background: #e0f2fe;
+}
+
+.focusMain {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.8rem;
+}
+
+.focusMain h3 {
+  margin: 0 0 0.35rem;
+}
+
+.focusMeta {
+  margin: 0;
+  color: #334155;
+}
+
+.focusImages {
+  margin-top: 0.7rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem;
+}
+
+.focusImageCard {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.focusImageCard img {
+  width: 100%;
+  height: 260px;
+  object-fit: cover;
+  display: block;
+  background: #e2e8f0;
+}
+
+.focusImageCard p {
+  margin: 0;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.9rem;
+}
+
+.small {
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+@media (max-width: 980px) {
+  .focusWrap {
+    grid-template-columns: 1fr;
+  }
+  .focusImages {
+    grid-template-columns: 1fr;
+  }
+}
+
 .header {
   display: flex;
   justify-content: space-between;

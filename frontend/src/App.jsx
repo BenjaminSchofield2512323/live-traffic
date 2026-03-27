@@ -12,6 +12,8 @@ function buildImageURL(path) {
 function App() {
   const [recommended, setRecommended] = useState([])
   const [alerts, setAlerts] = useState([])
+  const [cameraViews, setCameraViews] = useState([])
+  const [focusCameraID, setFocusCameraID] = useState(null)
   const [pipelineStatus, setPipelineStatus] = useState(null)
   const [analysisPlan, setAnalysisPlan] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -36,11 +38,12 @@ function App() {
     setLoading(true)
     setError('')
     try {
-      const [camsResp, planResp, alertsResp, statusResp] = await Promise.all([
+      const [camsResp, planResp, alertsResp, statusResp, viewsResp] = await Promise.all([
         fetch(`${apiBase}/api/v1/cameras/recommended?count=10`),
         fetch(`${apiBase}/api/v1/analysis/plan`),
         fetch(`${apiBase}/api/v1/alerts?limit=100`),
         fetch(`${apiBase}/api/v1/pipeline/status`),
+        fetch(`${apiBase}/api/v1/pipeline/cameras`),
       ])
 
       if (!camsResp.ok) {
@@ -55,16 +58,25 @@ function App() {
       if (!statusResp.ok) {
         throw new Error(`pipeline status endpoint failed (${statusResp.status})`)
       }
+      if (!viewsResp.ok) {
+        throw new Error(`pipeline camera view endpoint failed (${viewsResp.status})`)
+      }
 
       const camsPayload = await camsResp.json()
       const planPayload = await planResp.json()
       const alertsPayload = await alertsResp.json()
       const statusPayload = await statusResp.json()
+      const viewsPayload = await viewsResp.json()
 
       setRecommended(camsPayload.data || [])
       setAnalysisPlan(planPayload)
       setAlerts(alertsPayload.data || [])
       setPipelineStatus(statusPayload)
+      setCameraViews(viewsPayload.data || [])
+
+      if (!focusCameraID && viewsPayload.data?.length) {
+        setFocusCameraID(viewsPayload.data[0].camera_id)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'unknown error')
     } finally {
@@ -124,14 +136,30 @@ function App() {
 
   useEffect(() => {
     const id = setInterval(() => {
-      fetch(`${apiBase}/api/v1/alerts?limit=100`)
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`alerts refresh failed (${r.status})`))))
-        .then((payload) => setAlerts(payload.data || []))
+      Promise.all([
+        fetch(`${apiBase}/api/v1/alerts?limit=100`)
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`alerts refresh failed (${r.status})`)))),
+        fetch(`${apiBase}/api/v1/pipeline/cameras`)
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`camera view refresh failed (${r.status})`)))),
+      ])
+        .then(([alertsPayload, viewsPayload]) => {
+          setAlerts(alertsPayload.data || [])
+          setCameraViews(viewsPayload.data || [])
+          if (!focusCameraID && viewsPayload.data?.length) {
+            setFocusCameraID(viewsPayload.data[0].camera_id)
+          }
+        })
         .catch(() => {})
+
       fetchPipelineStatus().catch(() => {})
     }, 5000)
     return () => clearInterval(id)
-  }, [])
+  }, [focusCameraID])
+
+  const focusedView = useMemo(
+    () => cameraViews.find((v) => v.camera_id === focusCameraID) || null,
+    [cameraViews, focusCameraID],
+  )
 
   return (
     <main className="app">
@@ -193,6 +221,70 @@ function App() {
             <li key={alertName}>{alertName}</li>
           ))}
         </ul>
+      </section>
+
+      <section className="focusPanel">
+        <div className="focusHeader">
+          <h2>Focused Live Processing</h2>
+          <select
+            value={focusCameraID ?? ''}
+            onChange={(e) => setFocusCameraID(Number(e.target.value))}
+            disabled={!cameraViews.length}
+          >
+            {!cameraViews.length && <option value="">No active camera views</option>}
+            {cameraViews.map((v) => (
+              <option key={v.camera_id} value={v.camera_id}>
+                {v.roadway || `Camera ${v.camera_id}`} - {v.location || 'Unknown location'}
+              </option>
+            ))}
+          </select>
+        </div>
+        {focusedView ? (
+          <>
+            <div className="focusGrid">
+              <div className="focusCard">
+                <h3>Live frame</h3>
+                {focusedView.live_image_url ? (
+                  <img
+                    src={`${apiBase}${focusedView.live_image_url}?t=${Date.now()}`}
+                    alt="live camera frame"
+                  />
+                ) : (
+                  <p>No frame yet</p>
+                )}
+              </div>
+              <div className="focusCard">
+                <h3>Processed frame</h3>
+                {focusedView.processed_image_url ? (
+                  <img
+                    src={`${apiBase}${focusedView.processed_image_url}?t=${Date.now()}`}
+                    alt="processed camera frame"
+                  />
+                ) : (
+                  <p>No processed frame yet</p>
+                )}
+              </div>
+            </div>
+            <p>
+              <strong>Camera:</strong> {focusedView.roadway} | <strong>Location:</strong>{' '}
+              {focusedView.location}
+            </p>
+            <p>
+              <strong>Motion:</strong> {focusedView.motion?.toFixed(4) ?? '0.0000'} |{' '}
+              <strong>Occupancy:</strong> {focusedView.occupancy?.toFixed(4) ?? '0.0000'} |{' '}
+              <strong>Failures:</strong> {focusedView.failures}
+            </p>
+            {focusedView.stream_url && (
+              <p>
+                <a href={focusedView.stream_url} target="_blank" rel="noreferrer">
+                  Open upstream stream URL
+                </a>
+              </p>
+            )}
+          </>
+        ) : (
+          <p>Start the pipeline to see live processing for a selected feed.</p>
+        )}
       </section>
 
       {loading && <p>Loading camera recommendations...</p>}

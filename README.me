@@ -50,6 +50,8 @@ Base URL: `http://localhost:8080`
   - Stops the pipeline.
 - `GET /api/v1/pipeline/status`
   - Running state, camera count, uptime, config summary.
+- `GET /api/v1/pipeline/cameras`
+  - Live per-camera processing view (raw + processed frame URLs + metrics).
 - `GET /api/v1/alerts?limit=100`
   - Structured incident alerts with evidence links.
 - `GET /artifacts/*`
@@ -92,6 +94,10 @@ Vite dev proxy forwards `/api` to backend on `localhost:8080`.
    - before snapshot
    - after snapshot
    - event GIF clip
+5. Use **Live Focus Camera** panel to watch one selected camera:
+   - raw latest frame
+   - processed frame (metric overlays)
+   - live motion/occupancy values
 
 You can also control via API:
 
