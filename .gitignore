@@ -2,4 +2,10 @@ frontend/node_modules/
 frontend/dist/
 backend/.cache/
 backend/api
+backend/artifacts/
 *.log
+.venv/
+yolov8n.pt
+detector_spike/.venv/
+detector_spike/__pycache__/
+detector_spike/.pytest_cache/

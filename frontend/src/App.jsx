@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
+import { FocusStreamFrames } from './FocusStreamFrames.jsx'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 const focusRefreshIntervalMs = 2000
@@ -17,6 +18,10 @@ function sleep(ms) {
 
 function App() {
   const [recommended, setRecommended] = useState([])
+  const [alerts, setAlerts] = useState([])
+  const [cameraViews, setCameraViews] = useState([])
+  const [focusCameraID, setFocusCameraID] = useState(null)
+  const [pipelineStatus, setPipelineStatus] = useState(null)
   const [analysisPlan, setAnalysisPlan] = useState(null)
   const [pipelineSummary, setPipelineSummary] = useState(null)
   const [detectStatus, setDetectStatus] = useState({
@@ -37,22 +42,42 @@ function App() {
   const [focusCacheBust, setFocusCacheBust] = useState(Date.now())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [starting, setStarting] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [focusFPS, setFocusFPS] = useState(30)
+  const [detectorFPS, setDetectorFPS] = useState(2)
+  /** Motion/occupancy from client-side frame diff on the HLS decode (same heuristics as API). */
+  const [streamClientMetrics, setStreamClientMetrics] = useState(null)
+  /** Detector-side metrics from YOLO sidecar via backend focus proxy. */
+  const [detectorMetrics, setDetectorMetrics] = useState(null)
+
+  const onStreamFrameMetrics = useCallback((m) => {
+    setStreamClientMetrics(m)
+  }, [])
 
   const totalFeeds = useMemo(() => recommended.length, [recommended])
-  const liveProbePass = useMemo(() => pipelineSummary?.live_stream_probe_pass || 0, [pipelineSummary])
-  const focusLiveSrc = `${apiBase}/api/v1/pipeline/focus/stream?mode=live&t=${focusCacheBust}`
-  const focusProcessedSrc = `${apiBase}/api/v1/pipeline/focus/stream?mode=processed&t=${focusCacheBust}`
+  const totalAlerts = useMemo(() => alerts.length, [alerts])
+
+  async function fetchPipelineStatus() {
+    const resp = await fetch(`${apiBase}/api/v1/pipeline/status`)
+    if (!resp.ok) {
+      throw new Error(`pipeline status endpoint failed (${resp.status})`)
+    }
+    const payload = await resp.json()
+    setPipelineStatus(payload)
+    return payload
+  }
 
   async function loadDashboard() {
     setLoading(true)
     setError('')
     try {
-      const [camsResp, planResp, pipelineResp] = await Promise.all([
-        fetch(`${apiBase}/api/v1/cameras/recommended?count=5`),
+      const [camsResp, planResp, alertsResp, statusResp, viewsResp] = await Promise.all([
+        fetch(`${apiBase}/api/v1/cameras/recommended?count=10`),
         fetch(`${apiBase}/api/v1/analysis/plan`),
-        fetch(`${apiBase}/api/v1/pipeline/start?camera_count=5`, {
-          method: 'POST',
-        }),
+        fetch(`${apiBase}/api/v1/alerts?limit=100`),
+        fetch(`${apiBase}/api/v1/pipeline/status`),
+        fetch(`${apiBase}/api/v1/pipeline/cameras`),
       ])
 
       if (!camsResp.ok) {
@@ -61,22 +86,81 @@ function App() {
       if (!planResp.ok) {
         throw new Error(`analysis plan endpoint failed (${planResp.status})`)
       }
-      if (!pipelineResp.ok) {
-        throw new Error(`pipeline start failed (${pipelineResp.status})`)
+      if (!alertsResp.ok) {
+        throw new Error(`alerts endpoint failed (${alertsResp.status})`)
+      }
+      if (!statusResp.ok) {
+        throw new Error(`pipeline status endpoint failed (${statusResp.status})`)
+      }
+      if (!viewsResp.ok) {
+        throw new Error(`pipeline camera view endpoint failed (${viewsResp.status})`)
       }
 
       const camsPayload = await camsResp.json()
       const planPayload = await planResp.json()
-      const pipelinePayload = await pipelineResp.json()
+      const alertsPayload = await alertsResp.json()
+      const statusPayload = await statusResp.json()
+      const viewsPayload = await viewsResp.json()
 
       setRecommended(camsPayload.data || [])
       setAnalysisPlan(planPayload)
-      setPipelineSummary(pipelinePayload)
-      setFocusCacheBust(Date.now())
+      setAlerts(alertsPayload.data || [])
+      setPipelineStatus(statusPayload)
+      setCameraViews(viewsPayload.data || [])
+
+      if (!focusCameraID && viewsPayload.data?.length) {
+        setFocusCameraID(viewsPayload.data[0].camera_id)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'unknown error')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function startPipeline() {
+    setStarting(true)
+    setError('')
+    try {
+      const resp = await fetch(`${apiBase}/api/v1/pipeline/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          camera_count: 10,
+          sample_interval_sec: 3,
+          buffer_seconds: 90,
+          pre_event_seconds: 30,
+          post_event_seconds: 45,
+        }),
+      })
+      if (!resp.ok) {
+        const payload = await resp.json().catch(() => ({}))
+        throw new Error(payload.error || `pipeline start failed (${resp.status})`)
+      }
+      await loadDashboard()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'unknown error')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  async function stopPipeline() {
+    setStopping(true)
+    setError('')
+    try {
+      const resp = await fetch(`${apiBase}/api/v1/pipeline/stop`, {
+        method: 'POST',
+      })
+      if (!resp.ok) {
+        const payload = await resp.json().catch(() => ({}))
+        throw new Error(payload.error || `pipeline stop failed (${resp.status})`)
+      }
+      await loadDashboard()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'unknown error')
+    } finally {
+      setStopping(false)
     }
   }
 
@@ -85,11 +169,36 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setFocusCacheBust(Date.now())
-    }, focusRefreshIntervalMs)
-    return () => window.clearInterval(timer)
-  }, [])
+    const id = setInterval(() => {
+      Promise.all([
+        fetch(`${apiBase}/api/v1/alerts?limit=100`)
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`alerts refresh failed (${r.status})`)))),
+        fetch(`${apiBase}/api/v1/pipeline/cameras`)
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`camera view refresh failed (${r.status})`)))),
+      ])
+        .then(([alertsPayload, viewsPayload]) => {
+          setAlerts(alertsPayload.data || [])
+          setCameraViews(viewsPayload.data || [])
+          if (!focusCameraID && viewsPayload.data?.length) {
+            setFocusCameraID(viewsPayload.data[0].camera_id)
+          }
+        })
+        .catch(() => {})
+
+      fetchPipelineStatus().catch(() => {})
+    }, 5000)
+    return () => clearInterval(id)
+  }, [focusCameraID])
+
+  const focusedView = useMemo(
+    () => cameraViews.find((v) => v.camera_id === focusCameraID) || null,
+    [cameraViews, focusCameraID],
+  )
+
+  useEffect(() => {
+    setStreamClientMetrics(null)
+    setDetectorMetrics(null)
+  }, [focusCameraID, focusedView?.stream_url])
 
   useEffect(() => {
     if (!pipelineSummary?.ok) return undefined
@@ -186,26 +295,43 @@ function App() {
     <main className="app">
       <header className="header">
         <div>
-          <h1>Live Traffic MVP</h1>
+          <h1>Incident Intelligence MVP</h1>
           <p className="sub">
-            Go backend + endpoint-based 511 ingestion + fast alert-first design.
+            Ingest feeds → detect events → score noise → emit alerts + evidence clips.
           </p>
         </div>
-        <button onClick={loadDashboard} className="refreshBtn">
-          Refresh feeds
-        </button>
+        <div className="buttonRow">
+          <button onClick={loadDashboard} className="refreshBtn">
+            Refresh
+          </button>
+          <button onClick={startPipeline} className="refreshBtn" disabled={starting || pipelineStatus?.running}>
+            {starting ? 'Starting...' : 'Start pipeline'}
+          </button>
+          <button onClick={stopPipeline} className="refreshBtn danger" disabled={stopping || !pipelineStatus?.running}>
+            {stopping ? 'Stopping...' : 'Stop pipeline'}
+          </button>
+        </div>
       </header>
 
       <section className="metrics">
         <article className="metricCard">
-          <h2>Recommended Cameras</h2>
-          <p className="metricValue">{totalFeeds}</p>
-          <small>v1 target: 5 default, supports 1-10</small>
+          <h2>Pipeline</h2>
+          <p className={`metricValue ${pipelineStatus?.running ? 'ok' : 'bad'}`}>
+            {pipelineStatus?.running ? 'RUNNING' : 'STOPPED'}
+          </p>
+          <small>
+            {pipelineStatus?.camera_count ?? 0} cameras, sample {pipelineStatus?.sample_interval || '...'}
+          </small>
         </article>
         <article className="metricCard">
-          <h2>Live Stream Probe Pass</h2>
-          <p className="metricValue">{liveProbePass}</p>
-          <small>phase 1 validated via HLS probe</small>
+          <h2>Alert Feed</h2>
+          <p className="metricValue">{totalAlerts}</p>
+          <small>structured events (not raw camera watching)</small>
+        </article>
+        <article className="metricCard">
+          <h2>High-Value Cameras</h2>
+          <p className="metricValue">{totalFeeds}</p>
+          <small>v1 target: 5-10 high-value feeds</small>
         </article>
         <article className="metricCard">
           <h2>Latency Target (p95)</h2>
@@ -250,7 +376,7 @@ function App() {
       </section>
 
       <section className="alerts">
-        <h2>Planned Alert Types</h2>
+        <h2>Detection Signals</h2>
         <ul>
           {(analysisPlan?.alerts || []).map((alertName) => (
             <li key={alertName}>{alertName}</li>
@@ -279,10 +405,103 @@ function App() {
             <img src={focusProcessedSrc} alt="Focus stream processed overlay" loading="lazy" />
           </article>
         </div>
+        {focusedView ? (
+          <>
+            {focusedView.stream_url ? (
+              <FocusStreamFrames
+                key={`${focusCameraID}-${focusedView.stream_url}`}
+                streamUrl={focusedView.stream_url}
+                fps={focusFPS}
+                detectorFPS={detectorFPS}
+                cameraID={focusCameraID}
+                apiBase={apiBase}
+                onFrameMetrics={onStreamFrameMetrics}
+                onDetectionMetrics={setDetectorMetrics}
+              />
+            ) : (
+              <p className="focusPlaceholder">
+                No HLS <code>stream_url</code> for this camera. Start the pipeline and pick a feed with video.
+              </p>
+            )}
+            <p>
+              <strong>Camera:</strong> {focusedView.roadway} | <strong>Location:</strong>{' '}
+              {focusedView.location}
+            </p>
+            <p>
+              <strong>Pipeline (snapshots):</strong> motion {focusedView.motion?.toFixed(4) ?? '0.0000'} | occupancy{' '}
+              {focusedView.occupancy?.toFixed(4) ?? '0.0000'} | failures {focusedView.failures}
+            </p>
+            {streamClientMetrics && (
+              <p className="focusMeta">
+                <strong>Stream frames (client, {focusFPS} fps target):</strong> motion{' '}
+                {streamClientMetrics.motion.toFixed(4)} | occupancy {streamClientMetrics.occupancy.toFixed(4)}
+              </p>
+            )}
+            {detectorMetrics?.metrics && (
+              <p className="focusMeta">
+                <strong>YOLO (server, {detectorFPS} fps target):</strong> vehicles{' '}
+                {detectorMetrics.metrics.vehicle_count ?? 0} | moving{' '}
+                {detectorMetrics.metrics.moving_vehicle_count ?? 0} | occupancy{' '}
+                {(detectorMetrics.metrics.occupancy_ratio ?? 0).toFixed(4)} | infer{' '}
+                {Number(detectorMetrics.inference_ms ?? 0).toFixed(1)}ms
+              </p>
+            )}
+            {focusedView.stream_url && (
+              <p>
+                <a href={focusedView.stream_url} target="_blank" rel="noreferrer">
+                  Open upstream stream URL
+                </a>
+              </p>
+            )}
+          </>
+        ) : (
+          <p>Start the pipeline to see live processing for a selected feed.</p>
+        )}
       </section>
 
       {loading && <p>Loading camera recommendations...</p>}
       {error && <p className="error">Error: {error}</p>}
+
+      <section>
+        <h2>Incident Alerts</h2>
+        <div className="cameraGrid">
+          {alerts.map((alert) => (
+            <article key={alert.id} className="cameraCard">
+              <div className="cameraBody">
+                <h3>{alert.event_type}</h3>
+                <p>{alert.location}</p>
+                <p>
+                  <strong>When:</strong> {new Date(alert.timestamp).toLocaleString()}
+                </p>
+                <p>
+                  <strong>Confidence:</strong> {(alert.confidence * 100).toFixed(1)}%
+                </p>
+                <p>
+                  <strong>Reason:</strong> {alert.reason}
+                </p>
+                <div className="links">
+                  {alert.before_image_url && (
+                    <a href={`${apiBase}${alert.before_image_url}`} target="_blank" rel="noreferrer">
+                      Before snapshot
+                    </a>
+                  )}
+                  {alert.after_image_url && (
+                    <a href={`${apiBase}${alert.after_image_url}`} target="_blank" rel="noreferrer">
+                      After snapshot
+                    </a>
+                  )}
+                  {alert.clip_url && (
+                    <a href={`${apiBase}${alert.clip_url}`} target="_blank" rel="noreferrer">
+                      Event clip
+                    </a>
+                  )}
+                </div>
+              </div>
+            </article>
+          ))}
+          {!alerts.length && <p>No alerts yet. Start pipeline and wait for detected events.</p>}
+        </div>
+      </section>
 
       <section className="cameraGrid">
         {recommended.map((cam) => {
@@ -307,11 +526,7 @@ function App() {
                   <a href={feed?.videoUrl} target="_blank" rel="noreferrer">
                     Open live stream
                   </a>
-                  <a
-                    href={buildImageURL(feed?.imageUrl)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
+                  <a href={buildImageURL(feed?.imageUrl)} target="_blank" rel="noreferrer">
                     Open snapshot
                   </a>
                 </div>

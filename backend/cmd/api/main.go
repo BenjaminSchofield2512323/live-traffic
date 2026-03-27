@@ -11,8 +11,8 @@ import (
 	"net/http/cookiejar"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,14 +22,24 @@ const (
 	defaultUserAgent       = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 	defaultDetectorBaseURL = "http://localhost:8090"
 
-	defaultRecommendedCameraCount = 5
-	minRecommendedCameraCount     = 1
+	defaultRecommendedCameraCount = 10
+	minRecommendedCameraCount     = 5
 	maxRecommendedCameraCount     = 10
 
-	defaultPipelineCameraCount = 5
-	minPipelineCameraCount     = 5
-	maxPipelineCameraCount     = 10
+	defaultFocusFPS = 30
+	minFocusFPS     = 1
+	maxFocusFPS     = 30
+
+	defaultListLength = 25
+	minListLength     = 1
+	maxListLength     = 100
+
+	defaultAlertListLimit = 50
+	minAlertListLimit     = 1
+	maxAlertListLimit     = 200
 )
+
+var targetCorridors = []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"}
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -48,10 +58,12 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", withCORS(func(w http.ResponseWriter, _ *http.Request) {
+		status := pipeline.Status()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"service": "live-traffic-api",
-			"time":    time.Now().UTC(),
+			"ok":               true,
+			"service":          "live-traffic-api",
+			"time":             time.Now().UTC(),
+			"pipeline_running": status.Running,
 		})
 	}))
 
@@ -60,8 +72,8 @@ func main() {
 		defer cancel()
 
 		start := intQuery(r, "start", 0)
-		length := intQuery(r, "length", 25)
-		if length < 1 || length > 100 {
+		length := boundedIntQuery(r, "length", defaultListLength, minListLength, maxListLength)
+		if length < minListLength || length > maxListLength {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "length must be between 1 and 100"})
 			return
 		}
@@ -80,26 +92,26 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 
-		count := intQuery(r, "count", defaultRecommendedCameraCount)
+		count := boundedIntQuery(r, "count", defaultRecommendedCameraCount, minRecommendedCameraCount, maxRecommendedCameraCount)
 		if count < minRecommendedCameraCount || count > maxRecommendedCameraCount {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "count must be between 1 and 10"})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "count must be between 5 and 10"})
 			return
 		}
 
-		payload, err := client.listCameras(ctx, 0, 250)
+		allCameras, err := fetchAllCameras(ctx, client, 200, 2500)
 		if err != nil {
 			logger.Error("list cameras for recommendation failed", "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
 
-		ranked := recommendCameras(payload.Data, maxRecommendedCameraCount)
-		recommended, liveProbePass := selectRecommendedCameras(ctx, client, ranked, count)
+		recommended := selectLiveRecommended(ctx, client, allCameras, count)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"count":                  len(recommended),
-			"live_stream_probe_pass": liveProbePass,
-			"targets":                []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"},
-			"data":                   recommended,
+			"count":           len(recommended),
+			"requested_count": count,
+			"live_validated":  true,
+			"targets":         targetCorridors,
+			"data":            recommended,
 		})
 	}))
 
@@ -108,11 +120,11 @@ func main() {
 	mux.HandleFunc("/api/v1/pipeline/focus/detect", withCORS(pipeline.handleFocusDetect))
 
 	mux.HandleFunc("/api/v1/analysis/plan", withCORS(func(w http.ResponseWriter, _ *http.Request) {
-		// This endpoint keeps model choice explicit while we stand up inference workers.
+		// V1 keeps detection lightweight and explainable before heavier CV models.
 		writeJSON(w, http.StatusOK, map[string]any{
-			"inference_runtime":       "python-sidecar",
-			"detection_model":         "yolo (latest family, tuned for vehicles)",
-			"tracking_model":          "bytetrack",
+			"inference_runtime":       "go-heuristics-v1",
+			"detection_model":         "rolling-buffer + motion/occupancy heuristics",
+			"tracking_model":          "none (v1)",
 			"recommended_fps_per_cam": "2-5",
 			"latency_target_p95_sec":  3,
 			"alerts": []string{
@@ -121,8 +133,172 @@ func main() {
 				"queue_growth",
 				"camera_offline",
 			},
+			"pipeline_steps": []string{
+				"ingest",
+				"rolling_buffer",
+				"detection",
+				"event_scoring",
+				"trigger_and_clip",
+				"alert_output_and_webhook",
+			},
 		})
 	}))
+
+	mux.HandleFunc("/api/v1/pipeline/start", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use POST"})
+			return
+		}
+		var req startPipelineRequest
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		cfg := req.toConfig()
+		if err := pipeline.Start(r.Context(), cfg); err != nil {
+			if errors.Is(err, errPipelineAlreadyRunning) {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": pipeline.Status(),
+		})
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/stop", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use POST"})
+			return
+		}
+		pipeline.Stop()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": pipeline.Status(),
+		})
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/status", withCORS(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, pipeline.Status())
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/cameras", withCORS(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"count": len(pipeline.ListCameraViews()),
+			"data":  pipeline.ListCameraViews(),
+		})
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/focus/stream", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use GET"})
+			return
+		}
+
+		cameraID := intQuery(r, "camera_id", 0)
+		if cameraID <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
+			return
+		}
+
+		mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+		if mode == "" {
+			mode = "processed"
+		}
+
+		if !pipeline.HasCamera(cameraID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "camera not active in current pipeline"})
+			return
+		}
+
+		fps := boundedIntQuery(r, "fps", defaultFocusFPS, minFocusFPS, maxFocusFPS)
+		pipeline.StreamFocus(w, r, cameraID, mode, fps)
+	})
+
+	mux.HandleFunc("/api/v1/pipeline/focus/snapshot", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use GET"})
+			return
+		}
+		cameraID := intQuery(r, "camera_id", 0)
+		if cameraID <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
+			return
+		}
+		mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+		if mode == "" {
+			mode = "processed"
+		}
+		pipeline.WriteFocusSnapshot(r.Context(), w, cameraID, mode)
+	}))
+
+	mux.HandleFunc("/api/v1/pipeline/focus/detect", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use POST"})
+			return
+		}
+
+		cameraID := intQuery(r, "camera_id", 0)
+		if cameraID <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
+			return
+		}
+		if !pipeline.HasCamera(cameraID) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "camera not active in current pipeline"})
+			return
+		}
+
+		imageBytes, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read image bytes"})
+			return
+		}
+		if len(imageBytes) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request body must contain image bytes"})
+			return
+		}
+
+		q := r.URL.Query()
+		if strings.TrimSpace(q.Get("stream_id")) == "" {
+			q.Set("stream_id", fmt.Sprintf("cam-%d", cameraID))
+		}
+		if strings.TrimSpace(q.Get("imgsz")) == "" {
+			q.Set("imgsz", "640")
+		}
+		if strings.TrimSpace(q.Get("conf")) == "" {
+			q.Set("conf", "0.25")
+		}
+
+		detectCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		defer cancel()
+		payload, err := detector.Detect(detectCtx, imageBytes, q)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	}))
+
+	mux.HandleFunc("/api/v1/alerts", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		limit := boundedIntQuery(r, "limit", defaultAlertListLimit, minAlertListLimit, maxAlertListLimit)
+		alerts := pipeline.ListAlerts(limit)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"count": len(alerts),
+			"data":  alerts,
+		})
+	}))
+
+	mux.Handle("/artifacts/", withCORSHandler(http.StripPrefix("/artifacts/", http.FileServer(http.Dir(artifactDir)))))
 
 	server := &http.Server{
 		Addr:              ":" + port,
@@ -138,9 +314,16 @@ func main() {
 }
 
 type ny511Client struct {
-	baseURL    string
-	userAgent  string
-	httpClient *http.Client
+	baseURL     string
+	userAgent   string
+	httpClient  *http.Client
+	streamMu    sync.Mutex
+	streamCache map[string]streamProbeResult
+}
+
+type streamProbeResult struct {
+	OK        bool
+	CheckedAt time.Time
 }
 
 func newNY511Client(baseURL string) (*ny511Client, error) {
@@ -156,6 +339,7 @@ func newNY511Client(baseURL string) (*ny511Client, error) {
 			Timeout: 20 * time.Second,
 			Jar:     jar,
 		},
+		streamCache: make(map[string]streamProbeResult, 256),
 	}, nil
 }
 
@@ -242,6 +426,141 @@ func (c *ny511Client) primeSession(ctx context.Context) error {
 	return nil
 }
 
+func (c *ny511Client) fetchCameraImage(ctx context.Context, imageURL string) ([]byte, error) {
+	if imageURL == "" {
+		return nil, errors.New("empty image url")
+	}
+	targetURL := imageURL
+	if strings.HasPrefix(targetURL, "/") {
+		targetURL = c.baseURL + targetURL
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create image request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+	req.Header.Set("Referer", c.baseURL+"/cctv")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch camera image: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("camera image status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read camera image: %w", err)
+	}
+	return b, nil
+}
+
+// cacheBustURL appends a unique query param so CDNs / reverse proxies don't keep
+// serving the same JPEG bytes for identical snapshot URLs.
+func cacheBustURL(imageURL string) string {
+	sep := "?"
+	if strings.Contains(imageURL, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf("%s%st=%d", imageURL, sep, time.Now().UnixNano())
+}
+
+// fetchCameraImageFresh requests the snapshot with a unique URL and no-cache headers
+// so each poll can receive a newly rendered frame from 511.
+func (c *ny511Client) fetchCameraImageFresh(ctx context.Context, imageURL string) ([]byte, error) {
+	if imageURL == "" {
+		return nil, errors.New("empty image url")
+	}
+	targetURL := imageURL
+	if strings.HasPrefix(targetURL, "/") {
+		targetURL = c.baseURL + targetURL
+	}
+	targetURL = cacheBustURL(targetURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create image request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+	req.Header.Set("Referer", c.baseURL+"/cctv")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch camera image: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("camera image status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read camera image: %w", err)
+	}
+	return b, nil
+}
+
+func (c *ny511Client) streamLooksLive(ctx context.Context, streamURL string) bool {
+	if strings.TrimSpace(streamURL) == "" {
+		return false
+	}
+
+	now := time.Now().UTC()
+	c.streamMu.Lock()
+	cached, ok := c.streamCache[streamURL]
+	if ok && now.Sub(cached.CheckedAt) < 2*time.Minute {
+		c.streamMu.Unlock()
+		return cached.OK
+	}
+	c.streamMu.Unlock()
+
+	probeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.cacheStreamProbe(streamURL, false)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		c.cacheStreamProbe(streamURL, false)
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		c.cacheStreamProbe(streamURL, false)
+		return false
+	}
+	text := strings.ToUpper(string(body))
+	ok = strings.Contains(text, "#EXTM3U") || strings.Contains(text, "#EXTINF") || strings.Contains(text, "#EXT-X-STREAM-INF")
+	c.cacheStreamProbe(streamURL, ok)
+	return ok
+}
+
+func (c *ny511Client) cacheStreamProbe(streamURL string, ok bool) {
+	c.streamMu.Lock()
+	c.streamCache[streamURL] = streamProbeResult{OK: ok, CheckedAt: time.Now().UTC()}
+	c.streamMu.Unlock()
+}
+
 type listResponse struct {
 	Draw            int      `json:"draw"`
 	RecordsTotal    int      `json:"recordsTotal"`
@@ -292,21 +611,16 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 
 	scored := make([]scoredCamera, 0, len(cameras))
 	for _, c := range cameras {
-		eligibleFeedIndex := firstVideoEligibleFeedIndex(c.Images)
-		if eligibleFeedIndex < 0 {
+		if len(c.Images) == 0 {
 			continue
 		}
-		if eligibleFeedIndex > 0 {
-			// Keep the selected video-capable feed at index 0 so downstream consumers
-			// can safely use images[0] for video/snapshot links.
-			images := make([]cameraFeed, 0, len(c.Images))
-			images = append(images, c.Images[eligibleFeedIndex])
-			images = append(images, c.Images[:eligibleFeedIndex]...)
-			images = append(images, c.Images[eligibleFeedIndex+1:]...)
-			c.Images = images
+		f := c.Images[0]
+		if f.VideoURL == "" || f.VideoDisabled || f.Disabled || f.Blocked || f.IsVideoAuthRequired {
+			continue
 		}
 
 		roadway := strings.ToUpper(c.Roadway)
+		corridor := corridorForRoadway(roadway)
 		score := 1
 		reason := "has live video"
 		for k, v := range priority {
@@ -326,7 +640,7 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 
 		scored = append(scored, scoredCamera{
 			Score:  score,
-			Why:    reason,
+			Why:    reason + "; " + corridor,
 			camera: c,
 		})
 	}
@@ -335,37 +649,34 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 		return scored[i].Score > scored[j].Score
 	})
 
-	if len(scored) > count {
-		return scored[:count]
-	}
-	return scored
-}
-
-func firstVideoEligibleFeedIndex(feeds []cameraFeed) int {
-	for i, feed := range feeds {
-		if isVideoEligibleFeed(feed) {
-			return i
+	// Prefer corridor diversity in the first pass, then fill remaining slots.
+	selected := make([]scoredCamera, 0, count)
+	perCorridor := map[string]int{}
+	for _, c := range scored {
+		corridor := corridorForRoadway(strings.ToUpper(c.Roadway))
+		if corridor == "" {
+			corridor = "other"
+		}
+		if perCorridor[corridor] >= 1 {
+			continue
+		}
+		selected = append(selected, c)
+		perCorridor[corridor]++
+		if len(selected) >= count {
+			return selected
 		}
 	}
-	return -1
-}
-
-func isVideoEligibleFeed(feed cameraFeed) bool {
-	return strings.TrimSpace(feed.VideoURL) != "" &&
-		!feed.VideoDisabled &&
-		!feed.Disabled &&
-		!feed.Blocked &&
-		!feed.IsVideoAuthRequired
-}
-
-func buildAbsoluteURL(raw string) string {
-	if raw == "" {
-		return ""
+	for _, c := range scored {
+		if len(selected) >= count {
+			break
+		}
+		selected = append(selected, c)
 	}
-	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
-		return raw
+
+	if len(selected) > count {
+		return selected[:count]
 	}
-	return "https://511ny.org" + raw
+	return selected
 }
 
 func envOrDefault(key, fallback string) string {
@@ -374,35 +685,4 @@ func envOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return v
-}
-
-func intQuery(r *http.Request, key string, fallback int) int {
-	raw := strings.TrimSpace(r.URL.Query().Get(key))
-	if raw == "" {
-		return fallback
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return fallback
-	}
-	return v
-}
-
-func withCORS(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next(w, r)
-	}
-}
-
-func writeJSON(w http.ResponseWriter, code int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(payload)
 }

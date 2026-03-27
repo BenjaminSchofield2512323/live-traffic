@@ -1,0 +1,253 @@
+{
+  "model": "yolov8n.pt",
+  "device": "cpu",
+  "inference_ms": 71.67,
+  "image": {
+    "width": 640,
+    "height": 352
+  },
+  "detections": [
+    {
+      "bbox": [
+        238.08673095703125,
+        163.78036499023438,
+        270.96258544921875,
+        192.41873168945312
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.6383441686630249,
+      "center": [
+        254.524658203125,
+        178.09954833984375
+      ],
+      "track_id": 1,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        305.6607666015625,
+        140.81365966796875,
+        334.0826416015625,
+        167.18243408203125
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.5980730652809143,
+      "center": [
+        319.8717041015625,
+        153.998046875
+      ],
+      "track_id": 2,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        20.383657455444336,
+        124.15446472167969,
+        71.90970611572266,
+        154.71046447753906
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.5968833565711975,
+      "center": [
+        46.146681785583496,
+        139.43246459960938
+      ],
+      "track_id": 3,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        345.61065673828125,
+        139.37832641601562,
+        364.63311767578125,
+        161.76205444335938
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.5429282784461975,
+      "center": [
+        355.12188720703125,
+        150.5701904296875
+      ],
+      "track_id": 4,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        533.28564453125,
+        75.41856384277344,
+        551.3662109375,
+        92.95063781738281
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.5024459958076477,
+      "center": [
+        542.325927734375,
+        84.18460083007812
+      ],
+      "track_id": 5,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        589.376220703125,
+        126.0130615234375,
+        639.79638671875,
+        165.53143310546875
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.4800751805305481,
+      "center": [
+        614.5863037109375,
+        145.77224731445312
+      ],
+      "track_id": 6,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        332.14837646484375,
+        128.84530639648438,
+        351.19915771484375,
+        142.76870727539062
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.38502857089042664,
+      "center": [
+        341.67376708984375,
+        135.8070068359375
+      ],
+      "track_id": 7,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        274.2366027832031,
+        172.68594360351562,
+        306.9235534667969,
+        200.75167846679688
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.35230228304862976,
+      "center": [
+        290.580078125,
+        186.71881103515625
+      ],
+      "track_id": 8,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        581.5498046875,
+        96.02021789550781,
+        609.47705078125,
+        117.40806579589844
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.3366851210594177,
+      "center": [
+        595.513427734375,
+        106.71414184570312
+      ],
+      "track_id": 9,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        311.87347412109375,
+        122.29658508300781,
+        333.51580810546875,
+        135.08229064941406
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.3277476131916046,
+      "center": [
+        322.69464111328125,
+        128.68943786621094
+      ],
+      "track_id": 10,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        71.3133316040039,
+        122.73178100585938,
+        94.90692901611328,
+        141.48153686523438
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.3183280825614929,
+      "center": [
+        83.1101303100586,
+        132.10665893554688
+      ],
+      "track_id": 11,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    },
+    {
+      "bbox": [
+        320.76275634765625,
+        164.8684844970703,
+        346.7784423828125,
+        196.9375762939453
+      ],
+      "class_id": 2,
+      "class_name": "car",
+      "confidence": 0.3136500418186188,
+      "center": [
+        333.7705993652344,
+        180.9030303955078
+      ],
+      "track_id": 12,
+      "speed_px_s": 0.0,
+      "is_moving": false
+    }
+  ],
+  "metrics": {
+    "occupancy_ratio": 0.04061168323863636,
+    "occupied_px": 9149,
+    "roi_area_px": 225280,
+    "vehicle_count": 12,
+    "moving_vehicle_count": 0,
+    "stationary_vehicle_count": 12,
+    "moving_ratio": 0.0,
+    "mean_track_speed_px_s": 0.0
+  },
+  "metric_definitions": {
+    "occupancy_ratio": "fraction of ROI pixels covered by union of vehicle detection boxes",
+    "moving_ratio": "moving vehicles / total vehicles from nearest-neighbor track updates",
+    "mean_track_speed_px_s": "mean centroid speed in pixels/sec across tracked vehicles"
+  },
+  "stream_id": "cam-3104",
+  "ts_unix_ms": 1774629576670,
+  "client_roundtrip_ms": 80.05,
+  "sample_input": {
+    "api_base": "http://localhost:8080",
+    "detector_base": "http://localhost:8090",
+    "camera_id": 3104,
+    "mode": "processed",
+    "stream_id": "cam-3104",
+    "snapshot_bytes_len": 50302
+  }
+}

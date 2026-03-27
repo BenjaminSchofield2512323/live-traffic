@@ -26,26 +26,34 @@ The backend reproduces required headers/session behavior so ingestion is stable 
    - fetches cameras from `/List/GetData/Cameras`
    - scores cameras for V1 recommendation set (5-10)
 
-2. **Inference Worker (planned, Python sidecar)**
-   - consumes HLS streams
-   - YOLO detector + ByteTrack tracker
+2. **Detection/Scoring Engine (implemented v1 in Go)**
+   - consumes rolling camera snapshots
+   - computes lightweight motion + occupancy heuristics
    - emits:
-     - vehicle count rate
-     - congestion score
-     - stopped vehicle alerts
+     - congestion spike alerts
+     - stopped vehicle candidates
      - queue growth alerts
+     - camera offline alerts
+   - captures evidence artifacts per alert:
+     - pre-event snapshot
+     - post-event snapshot
+     - event GIF clip
 
-3. **Metrics and Storage (planned)**
+3. **Model Worker (planned, optional sidecar)**
+   - future YOLO + tracking for higher precision under scale
+   - can replace or augment heuristic scoring
+
+4. **Metrics and Storage (planned)**
    - hot path: Redis (short TTL)
    - durable path: Postgres/Timescale
    - optional media retention:
      - raw clips/snapshots in S3
      - lifecycle policy for cost control
 
-4. **Frontend (React)**
-   - recommended camera list
-   - video URLs and health context
-   - analysis plan and operator notes
+5. **Frontend (React)**
+   - pipeline controls (start/stop/status)
+   - live alert feed with evidence clip links
+   - camera shortlist and health context
 
 ## Latency goals
 
