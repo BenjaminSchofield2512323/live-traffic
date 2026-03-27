@@ -3,6 +3,7 @@ import './App.css'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 const focusRefreshIntervalMs = 2000
+const detectLoopIntervalMs = 1200
 
 function buildImageURL(path) {
   if (!path) return ''
@@ -10,10 +11,24 @@ function buildImageURL(path) {
   return `https://511ny.org${path}`
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 function App() {
   const [recommended, setRecommended] = useState([])
   const [analysisPlan, setAnalysisPlan] = useState(null)
   const [pipelineSummary, setPipelineSummary] = useState(null)
+  const [detectStatus, setDetectStatus] = useState({
+    phase: 'idle',
+    inProgress: false,
+    detectorAvailable: false,
+    consecutiveFailures: 0,
+    retryAfterMs: 0,
+    lastError: '',
+    lastDurationMs: 0,
+    detectionsCount: 0,
+  })
   const [focusCacheBust, setFocusCacheBust] = useState(Date.now())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -71,6 +86,86 @@ function App() {
     return () => window.clearInterval(timer)
   }, [])
 
+  useEffect(() => {
+    if (!pipelineSummary?.ok) return undefined
+
+    let stopped = false
+    let inFlight = false
+
+    async function runDetectWorkflowLoop() {
+      while (!stopped) {
+        if (inFlight) {
+          await sleep(150)
+          continue
+        }
+
+        inFlight = true
+        try {
+          const detectResp = await fetch(
+            `${apiBase}/api/v1/pipeline/focus/detect?imgsz=640&conf=0.25`,
+            { method: 'POST' },
+          )
+          if (!detectResp.ok) {
+            setDetectStatus((prev) => ({
+              ...prev,
+              phase: 'error',
+              inProgress: false,
+              detectorAvailable: false,
+              consecutiveFailures: prev.consecutiveFailures + 1,
+              lastError: `detect endpoint failed (${detectResp.status})`,
+            }))
+            await sleep(2000)
+            continue
+          }
+
+          const payload = await detectResp.json()
+          const workflow = payload?.workflow || {}
+          const detections = payload?.detector?.detections
+          const detectionsCount = Array.isArray(detections)
+            ? detections.length
+            : Array.isArray(payload?.detector?.boxes)
+              ? payload.detector.boxes.length
+              : 0
+
+          setDetectStatus({
+            phase: workflow.phase || (payload.ok ? 'ready' : 'cooldown'),
+            inProgress: Boolean(workflow.in_progress),
+            detectorAvailable: Boolean(payload.detector_available),
+            consecutiveFailures: Number(workflow.consecutive_failures || 0),
+            retryAfterMs: Number(workflow.retry_after_ms || 0),
+            lastError: payload.error || workflow.last_error || '',
+            lastDurationMs: Number(workflow.last_duration_ms || 0),
+            detectionsCount,
+          })
+
+          const cooldown = Number(workflow.retry_after_ms || 0)
+          if (cooldown > 0) {
+            await sleep(Math.min(Math.max(cooldown, 250), 5000))
+          } else {
+            await sleep(detectLoopIntervalMs)
+          }
+        } catch (err) {
+          setDetectStatus((prev) => ({
+            ...prev,
+            phase: 'error',
+            inProgress: false,
+            detectorAvailable: false,
+            consecutiveFailures: prev.consecutiveFailures + 1,
+            lastError: err instanceof Error ? err.message : 'detect request failed',
+          }))
+          await sleep(2000)
+        } finally {
+          inFlight = false
+        }
+      }
+    }
+
+    runDetectWorkflowLoop()
+    return () => {
+      stopped = true
+    }
+  }, [pipelineSummary?.ok])
+
   return (
     <main className="app">
       <header className="header">
@@ -110,6 +205,21 @@ function App() {
           <p className="metricValue">{analysisPlan?.recommended_fps_per_cam || '...'}</p>
           <small>CPU-first, adaptive sampling</small>
         </article>
+        <article className="metricCard">
+          <h2>YOLO Detector</h2>
+          <p className="metricValue">{detectStatus.detectorAvailable ? 'Online' : 'Offline'}</p>
+          <small>
+            phase: {detectStatus.phase} | failures: {detectStatus.consecutiveFailures}
+          </small>
+        </article>
+        <article className="metricCard">
+          <h2>Focus Detections</h2>
+          <p className="metricValue">{detectStatus.detectionsCount}</p>
+          <small>
+            last run: {detectStatus.lastDurationMs}ms
+            {detectStatus.retryAfterMs > 0 ? ` | retry in ${detectStatus.retryAfterMs}ms` : ''}
+          </small>
+        </article>
       </section>
 
       <section className="alerts">
@@ -123,6 +233,7 @@ function App() {
 
       <section className="focusPanel">
         <h2>Focus Stream</h2>
+        {detectStatus.lastError && <p className="warn">Detector: {detectStatus.lastError}</p>}
         <div className="focusGrid">
           <article className="focusCard">
             <h3>Raw Snapshot (mode=live)</h3>

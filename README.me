@@ -35,6 +35,9 @@ Base URL: `http://localhost:8080`
   - Starts the in-memory focus pipeline selection (invalid values default to 5; valid range 5-10).
 - `GET /api/v1/pipeline/focus/stream?mode=live|processed`
   - Returns focus snapshot stream bytes for `<img>` usage (`mode=raw` is treated as `processed`).
+- `POST /api/v1/pipeline/focus/detect?stream_id=cam-49&imgsz=640&conf=0.25`
+  - Fetches current focus snapshot and forwards bytes to detector sidecar (`DETECTOR_BASE_URL/internal/detect`).
+  - Returns workflow state (`running`/`cooldown`/`ready`) to prevent detector request floods.
 - `GET /api/v1/analysis/plan`
   - Returns baseline latency/model/alert strategy.
 
@@ -49,6 +52,7 @@ Environment variables:
 
 - `PORT` (default `8080`)
 - `NY511_BASE_URL` (default `https://511ny.org`)
+- `DETECTOR_BASE_URL` (default `http://localhost:8090`)
 
 ---
 

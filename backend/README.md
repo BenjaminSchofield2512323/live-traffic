@@ -16,6 +16,7 @@ This service is the control-plane API for v1.
 - `GET /api/v1/cameras/recommended?count=5`
 - `POST /api/v1/pipeline/start?camera_count=5`
 - `GET /api/v1/pipeline/focus/stream?mode=live|processed`
+- `POST /api/v1/pipeline/focus/detect?stream_id=cam-57&imgsz=640&conf=0.25`
 - `GET /api/v1/analysis/plan`
 
 ## Run locally
@@ -33,6 +34,10 @@ Default bind: `:8080`
   - ranks video-eligible feeds by corridor priority
   - phase 1 keeps feeds that pass a lightweight HLS liveness probe
   - phase 2 fills any remaining slots from the same ranked list (no probe requirement)
+- Focus detect flow:
+  - fetches current focus snapshot from selected camera
+  - forwards JPEG to detector sidecar at `${DETECTOR_BASE_URL}/internal/detect`
+  - tracks workflow progress and cooldown to avoid detector request floods
 - Inference is intentionally split for future sidecar workers:
   - Go API: orchestration and metrics/alerts API
   - Python worker: YOLO + tracking

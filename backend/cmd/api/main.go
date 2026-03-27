@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	defaultPort      = "8080"
-	defaultBaseURL   = "https://511ny.org"
-	defaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+	defaultPort            = "8080"
+	defaultBaseURL         = "https://511ny.org"
+	defaultUserAgent       = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+	defaultDetectorBaseURL = "http://localhost:8090"
 
 	defaultRecommendedCameraCount = 5
 	minRecommendedCameraCount     = 1
@@ -35,13 +36,15 @@ func main() {
 
 	port := envOrDefault("PORT", defaultPort)
 	baseURL := envOrDefault("NY511_BASE_URL", defaultBaseURL)
+	detectorBaseURL := envOrDefault("DETECTOR_BASE_URL", defaultDetectorBaseURL)
 
 	client, err := newNY511Client(baseURL)
 	if err != nil {
 		logger.Error("failed to create 511 client", "error", err)
 		os.Exit(1)
 	}
-	pipeline := newPipelineRuntime(client, logger)
+	detector := newDetectorClient(detectorBaseURL)
+	pipeline := newPipelineRuntime(client, detector, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", withCORS(func(w http.ResponseWriter, _ *http.Request) {
@@ -102,6 +105,7 @@ func main() {
 
 	mux.HandleFunc("/api/v1/pipeline/start", withCORS(pipeline.handleStart))
 	mux.HandleFunc("/api/v1/pipeline/focus/stream", withCORS(pipeline.handleFocusStream))
+	mux.HandleFunc("/api/v1/pipeline/focus/detect", withCORS(pipeline.handleFocusDetect))
 
 	mux.HandleFunc("/api/v1/analysis/plan", withCORS(func(w http.ResponseWriter, _ *http.Request) {
 		// This endpoint keeps model choice explicit while we stand up inference workers.
@@ -126,7 +130,7 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	logger.Info("api listening", "port", port, "baseURL", baseURL)
+	logger.Info("api listening", "port", port, "baseURL", baseURL, "detectorBaseURL", detectorBaseURL)
 	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server stopped unexpectedly", "error", err)
 		os.Exit(1)
