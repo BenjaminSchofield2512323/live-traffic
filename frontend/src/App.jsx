@@ -24,6 +24,8 @@ function App() {
   const [focusFPS, setFocusFPS] = useState(30)
   /** Motion/occupancy from client-side frame diff on the HLS decode (same heuristics as API). */
   const [streamClientMetrics, setStreamClientMetrics] = useState(null)
+  /** Detector-side metrics from YOLO sidecar via backend focus proxy. */
+  const [detectorMetrics, setDetectorMetrics] = useState(null)
 
   const onStreamFrameMetrics = useCallback((m) => {
     setStreamClientMetrics(m)
@@ -171,6 +173,7 @@ function App() {
 
   useEffect(() => {
     setStreamClientMetrics(null)
+    setDetectorMetrics(null)
   }, [focusCameraID, focusedView?.stream_url])
 
   return (
@@ -274,7 +277,10 @@ function App() {
                 key={`${focusCameraID}-${focusedView.stream_url}`}
                 streamUrl={focusedView.stream_url}
                 fps={focusFPS}
+                cameraID={focusCameraID}
+                apiBase={apiBase}
                 onFrameMetrics={onStreamFrameMetrics}
+                onDetectionMetrics={setDetectorMetrics}
               />
             ) : (
               <p className="focusPlaceholder">
@@ -293,6 +299,14 @@ function App() {
               <p className="focusMeta">
                 <strong>Stream frames (client, {focusFPS} fps target):</strong> motion{' '}
                 {streamClientMetrics.motion.toFixed(4)} | occupancy {streamClientMetrics.occupancy.toFixed(4)}
+              </p>
+            )}
+            {detectorMetrics?.metrics && (
+              <p className="focusMeta">
+                <strong>YOLO (server, throttled):</strong> vehicles {detectorMetrics.metrics.vehicle_count ?? 0} |
+                moving {detectorMetrics.metrics.moving_vehicle_count ?? 0} | occupancy{' '}
+                {(detectorMetrics.metrics.occupancy_ratio ?? 0).toFixed(4)} | infer{' '}
+                {Number(detectorMetrics.inference_ms ?? 0).toFixed(1)}ms
               </p>
             )}
             {focusedView.stream_url && (

@@ -17,7 +17,7 @@ function absolutize511StreamUrl(u) {
  * Hidden HLS video decodes the stream; two canvases show raw vs processed (overlay)
  * at the requested FPS — no visible video player.
  */
-export function FocusStreamFrames({ streamUrl, fps, onFrameMetrics }) {
+export function FocusStreamFrames({ streamUrl, fps, cameraID, apiBase, onFrameMetrics, onDetectionMetrics }) {
   const videoRef = useRef(null)
   const hlsRef = useRef(null)
   const rawRef = useRef(null)
@@ -27,12 +27,27 @@ export function FocusStreamFrames({ streamUrl, fps, onFrameMetrics }) {
   const rafRef = useRef(0)
   const lastFrameRef = useRef(0)
   const metricsCbRef = useRef(onFrameMetrics)
+  const detectionCbRef = useRef(onDetectionMetrics)
+  const detectInflightRef = useRef(false)
+  const lastDetectAtRef = useRef(0)
+  const latestDetectionRef = useRef(null)
   const [streamReady, setStreamReady] = useState(false)
   const [hlsError, setHlsError] = useState(null)
 
   useEffect(() => {
     metricsCbRef.current = onFrameMetrics
   }, [onFrameMetrics])
+
+  useEffect(() => {
+    detectionCbRef.current = onDetectionMetrics
+  }, [onDetectionMetrics])
+
+  useEffect(() => {
+    latestDetectionRef.current = null
+    detectInflightRef.current = false
+    lastDetectAtRef.current = 0
+    detectionCbRef.current?.(null)
+  }, [streamUrl, cameraID])
 
   useEffect(() => {
     const video = videoRef.current
@@ -106,6 +121,7 @@ export function FocusStreamFrames({ streamUrl, fps, onFrameMetrics }) {
 
     const ctxM = metricsCanvas.getContext('2d', { willReadFrequently: true })
     const intervalMs = 1000 / Math.max(1, Math.min(30, fps))
+    const detectorIntervalMs = 1000 / 2 // throttle YOLO path to ~2 fps for now
 
     const tick = (now) => {
       if (video.readyState < 2 || !video.videoWidth) {
@@ -147,7 +163,65 @@ export function FocusStreamFrames({ streamUrl, fps, onFrameMetrics }) {
       prevGrayRef.current = gray
 
       drawProcessedOverlay(procCtx, dw, dh, motion, occupancy)
+      const detectorPayload = latestDetectionRef.current
+      if (detectorPayload?.image && Array.isArray(detectorPayload.detections)) {
+        const detW = Number(detectorPayload.image.width || 0) || dw
+        const detH = Number(detectorPayload.image.height || 0) || dh
+        const sx = detW > 0 ? dw / detW : 1
+        const sy = detH > 0 ? dh / detH : 1
+
+        procCtx.lineWidth = 2
+        procCtx.strokeStyle = 'rgba(45,210,80,0.95)'
+        procCtx.font = '12px sans-serif'
+        procCtx.fillStyle = 'rgba(45,210,80,0.95)'
+        detectorPayload.detections.forEach((d) => {
+          if (!Array.isArray(d.bbox) || d.bbox.length < 4) return
+          const [x1, y1, x2, y2] = d.bbox
+          const bx = x1 * sx
+          const by = y1 * sy
+          const bw = Math.max(1, (x2 - x1) * sx)
+          const bh = Math.max(1, (y2 - y1) * sy)
+          procCtx.strokeRect(bx, by, bw, bh)
+          const tag = `${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
+          procCtx.fillText(tag, bx + 2, Math.max(12, by - 3))
+        })
+      }
       metricsCbRef.current?.({ motion, occupancy })
+
+      const shouldDetect =
+        cameraID &&
+        apiBase &&
+        !detectInflightRef.current &&
+        now - lastDetectAtRef.current >= detectorIntervalMs
+      if (shouldDetect) {
+        detectInflightRef.current = true
+        lastDetectAtRef.current = now
+        raw.toBlob(async (blob) => {
+          if (!blob) {
+            detectInflightRef.current = false
+            return
+          }
+          try {
+            const bytes = await blob.arrayBuffer()
+            const url = `${apiBase}/api/v1/pipeline/focus/detect?camera_id=${cameraID}&stream_id=cam-${cameraID}&imgsz=640&conf=0.25`
+            const resp = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/octet-stream' },
+              body: bytes,
+            })
+            if (!resp.ok) {
+              throw new Error(`detect failed (${resp.status})`)
+            }
+            const payload = await resp.json()
+            latestDetectionRef.current = payload
+            detectionCbRef.current?.(payload)
+          } catch {
+            // Keep rendering stream even if detector sidecar is unavailable.
+          } finally {
+            detectInflightRef.current = false
+          }
+        }, 'image/jpeg', 0.82)
+      }
 
       rafRef.current = requestAnimationFrame(tick)
     }
@@ -158,7 +232,7 @@ export function FocusStreamFrames({ streamUrl, fps, onFrameMetrics }) {
       cancelAnimationFrame(rafRef.current)
       prevGrayRef.current = null
     }
-  }, [fps, streamUrl])
+  }, [fps, streamUrl, cameraID, apiBase])
 
   return (
     <div className="focusStreamFrames">
