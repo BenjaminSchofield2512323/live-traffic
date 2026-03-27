@@ -7,13 +7,15 @@ This service is the control-plane API for v1.
 - Uses 511NY's internal data endpoint instead of scraping rendered HTML.
 - Primes session with `GET /cctv` and then fetches:
   - `GET /List/GetData/Cameras?lang=en&query=...`
-- Returns camera lists and recommended 5-10 camera picks with live `videoUrl`.
+- Returns camera lists and recommended camera picks with two-phase live-stream selection.
 
 ## Endpoints
 
 - `GET /healthz`
 - `GET /api/v1/cameras?start=0&length=25`
-- `GET /api/v1/cameras/recommended?count=10`
+- `GET /api/v1/cameras/recommended?count=5`
+- `POST /api/v1/pipeline/start?camera_count=5`
+- `GET /api/v1/pipeline/focus/stream?mode=live|processed`
 - `GET /api/v1/analysis/plan`
 
 ## Run locally
@@ -27,7 +29,10 @@ Default bind: `:8080`
 
 ## Notes
 
-- Current recommendation logic is deterministic and corridor-priority based.
+- Recommendation flow:
+  - ranks video-eligible feeds by corridor priority
+  - phase 1 keeps feeds that pass a lightweight HLS liveness probe
+  - phase 2 fills any remaining slots from the same ranked list (no probe requirement)
 - Inference is intentionally split for future sidecar workers:
   - Go API: orchestration and metrics/alerts API
   - Python worker: YOLO + tracking

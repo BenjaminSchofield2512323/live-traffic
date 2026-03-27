@@ -12,18 +12,26 @@ function buildImageURL(path) {
 function App() {
   const [recommended, setRecommended] = useState([])
   const [analysisPlan, setAnalysisPlan] = useState(null)
+  const [pipelineSummary, setPipelineSummary] = useState(null)
+  const [focusCacheBust, setFocusCacheBust] = useState(Date.now())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   const totalFeeds = useMemo(() => recommended.length, [recommended])
+  const liveProbePass = useMemo(() => pipelineSummary?.live_stream_probe_pass || 0, [pipelineSummary])
+  const focusLiveSrc = `${apiBase}/api/v1/pipeline/focus/stream?mode=live&t=${focusCacheBust}`
+  const focusProcessedSrc = `${apiBase}/api/v1/pipeline/focus/stream?mode=processed&t=${focusCacheBust}`
 
   async function loadDashboard() {
     setLoading(true)
     setError('')
     try {
-      const [camsResp, planResp] = await Promise.all([
-        fetch(`${apiBase}/api/v1/cameras/recommended?count=10`),
+      const [camsResp, planResp, pipelineResp] = await Promise.all([
+        fetch(`${apiBase}/api/v1/cameras/recommended?count=5`),
         fetch(`${apiBase}/api/v1/analysis/plan`),
+        fetch(`${apiBase}/api/v1/pipeline/start?camera_count=5`, {
+          method: 'POST',
+        }),
       ])
 
       if (!camsResp.ok) {
@@ -32,12 +40,18 @@ function App() {
       if (!planResp.ok) {
         throw new Error(`analysis plan endpoint failed (${planResp.status})`)
       }
+      if (!pipelineResp.ok) {
+        throw new Error(`pipeline start failed (${pipelineResp.status})`)
+      }
 
       const camsPayload = await camsResp.json()
       const planPayload = await planResp.json()
+      const pipelinePayload = await pipelineResp.json()
 
       setRecommended(camsPayload.data || [])
       setAnalysisPlan(planPayload)
+      setPipelineSummary(pipelinePayload)
+      setFocusCacheBust(Date.now())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'unknown error')
     } finally {
@@ -67,7 +81,12 @@ function App() {
         <article className="metricCard">
           <h2>Recommended Cameras</h2>
           <p className="metricValue">{totalFeeds}</p>
-          <small>v1 target: 5-10 high-value feeds</small>
+          <small>v1 target: 5 default, supports 1-10</small>
+        </article>
+        <article className="metricCard">
+          <h2>Live Stream Probe Pass</h2>
+          <p className="metricValue">{liveProbePass}</p>
+          <small>phase 1 validated via HLS probe</small>
         </article>
         <article className="metricCard">
           <h2>Latency Target (p95)</h2>
@@ -92,6 +111,20 @@ function App() {
             <li key={alertName}>{alertName}</li>
           ))}
         </ul>
+      </section>
+
+      <section className="focusPanel">
+        <h2>Focus Stream</h2>
+        <div className="focusGrid">
+          <article className="focusCard">
+            <h3>Raw Snapshot (mode=live)</h3>
+            <img src={focusLiveSrc} alt="Focus stream raw snapshot" loading="lazy" />
+          </article>
+          <article className="focusCard">
+            <h3>Overlay Preview (mode=processed)</h3>
+            <img src={focusProcessedSrc} alt="Focus stream processed overlay" loading="lazy" />
+          </article>
+        </div>
       </section>
 
       {loading && <p>Loading camera recommendations...</p>}

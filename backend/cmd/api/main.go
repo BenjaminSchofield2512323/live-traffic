@@ -20,6 +20,14 @@ const (
 	defaultPort      = "8080"
 	defaultBaseURL   = "https://511ny.org"
 	defaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+
+	defaultRecommendedCameraCount = 5
+	minRecommendedCameraCount     = 1
+	maxRecommendedCameraCount     = 10
+
+	defaultPipelineCameraCount = 5
+	minPipelineCameraCount     = 5
+	maxPipelineCameraCount     = 10
 )
 
 func main() {
@@ -33,6 +41,7 @@ func main() {
 		logger.Error("failed to create 511 client", "error", err)
 		os.Exit(1)
 	}
+	pipeline := newPipelineRuntime(client, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", withCORS(func(w http.ResponseWriter, _ *http.Request) {
@@ -68,9 +77,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
 
-		count := intQuery(r, "count", 10)
-		if count < 5 || count > 10 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "count must be between 5 and 10"})
+		count := intQuery(r, "count", defaultRecommendedCameraCount)
+		if count < minRecommendedCameraCount || count > maxRecommendedCameraCount {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "count must be between 1 and 10"})
 			return
 		}
 
@@ -81,13 +90,18 @@ func main() {
 			return
 		}
 
-		recommended := recommendCameras(payload.Data, count)
+		ranked := recommendCameras(payload.Data, maxRecommendedCameraCount)
+		recommended, liveProbePass := selectRecommendedCameras(ctx, client, ranked, count)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"count":   len(recommended),
-			"targets": []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"},
-			"data":    recommended,
+			"count":                  len(recommended),
+			"live_stream_probe_pass": liveProbePass,
+			"targets":                []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"},
+			"data":                   recommended,
 		})
 	}))
+
+	mux.HandleFunc("/api/v1/pipeline/start", withCORS(pipeline.handleStart))
+	mux.HandleFunc("/api/v1/pipeline/focus/stream", withCORS(pipeline.handleFocusStream))
 
 	mux.HandleFunc("/api/v1/analysis/plan", withCORS(func(w http.ResponseWriter, _ *http.Request) {
 		// This endpoint keeps model choice explicit while we stand up inference workers.
@@ -274,12 +288,18 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 
 	scored := make([]scoredCamera, 0, len(cameras))
 	for _, c := range cameras {
-		if len(c.Images) == 0 {
+		eligibleFeedIndex := firstVideoEligibleFeedIndex(c.Images)
+		if eligibleFeedIndex < 0 {
 			continue
 		}
-		f := c.Images[0]
-		if f.VideoURL == "" || f.VideoDisabled || f.Disabled || f.Blocked || f.IsVideoAuthRequired {
-			continue
+		if eligibleFeedIndex > 0 {
+			// Keep the selected video-capable feed at index 0 so downstream consumers
+			// can safely use images[0] for video/snapshot links.
+			images := make([]cameraFeed, 0, len(c.Images))
+			images = append(images, c.Images[eligibleFeedIndex])
+			images = append(images, c.Images[:eligibleFeedIndex]...)
+			images = append(images, c.Images[eligibleFeedIndex+1:]...)
+			c.Images = images
 		}
 
 		roadway := strings.ToUpper(c.Roadway)
@@ -315,6 +335,33 @@ func recommendCameras(cameras []camera, count int) []scoredCamera {
 		return scored[:count]
 	}
 	return scored
+}
+
+func firstVideoEligibleFeedIndex(feeds []cameraFeed) int {
+	for i, feed := range feeds {
+		if isVideoEligibleFeed(feed) {
+			return i
+		}
+	}
+	return -1
+}
+
+func isVideoEligibleFeed(feed cameraFeed) bool {
+	return strings.TrimSpace(feed.VideoURL) != "" &&
+		!feed.VideoDisabled &&
+		!feed.Disabled &&
+		!feed.Blocked &&
+		!feed.IsVideoAuthRequired
+}
+
+func buildAbsoluteURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	return "https://511ny.org" + raw
 }
 
 func envOrDefault(key, fallback string) string {

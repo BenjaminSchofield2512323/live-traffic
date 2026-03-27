@@ -29,8 +29,12 @@ Base URL: `http://localhost:8080`
 - `GET /healthz`
 - `GET /api/v1/cameras?start=0&length=25`
   - Calls 511NY's camera JSON endpoint with browser-like headers + session priming.
-- `GET /api/v1/cameras/recommended?count=10`
-  - Returns top camera candidates (5-10) for your MVP corridor focus.
+- `GET /api/v1/cameras/recommended?count=5`
+  - Returns top camera candidates (default 5; supports 1-10) for your MVP corridor focus.
+- `POST /api/v1/pipeline/start?camera_count=5`
+  - Starts the in-memory focus pipeline selection (invalid values default to 5; valid range 5-10).
+- `GET /api/v1/pipeline/focus/stream?mode=live|processed`
+  - Returns focus snapshot stream bytes for `<img>` usage (`mode=raw` is treated as `processed`).
 - `GET /api/v1/analysis/plan`
   - Returns baseline latency/model/alert strategy.
 
