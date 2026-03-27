@@ -1,0 +1,28 @@
+{
+  "sample_input": {
+    "api_base": "http://localhost:8080",
+    "detector_base": "http://localhost:8090",
+    "camera_id": 3104,
+    "mode": "raw",
+    "iterations": 10,
+    "imgsz": 640,
+    "conf": 0.25
+  },
+  "roundtrip_ms": {
+    "avg": 32.39,
+    "p50": 30.91,
+    "p95": 43.59,
+    "max": 43.59
+  },
+  "inference_ms": {
+    "avg": 26.07,
+    "p50": 24.3,
+    "p95": 36.34,
+    "max": 36.34
+  },
+  "vehicle_count": {
+    "avg": 12,
+    "min": 12,
+    "max": 12
+  }
+}

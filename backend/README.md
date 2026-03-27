@@ -28,6 +28,7 @@ Uses 511NY endpoint flow (same path behind "Show Video"), not HTML scraping:
 - `GET /api/v1/pipeline/status`
 - `GET /api/v1/pipeline/cameras`
 - `GET /api/v1/pipeline/focus/stream?camera_id=<id>&mode=processed|raw&fps=30`
+- `POST /api/v1/pipeline/focus/detect?camera_id=<id>&stream_id=cam-<id>&imgsz=640&conf=0.25`
 - `GET /api/v1/alerts?limit=100`
 - `GET /artifacts/...` (evidence files)
 
@@ -87,7 +88,19 @@ curl "http://localhost:8080/api/v1/pipeline/cameras"
 
 # Focus stream (MJPEG, defaults to processed mode and 30 FPS cap)
 curl "http://localhost:8080/api/v1/pipeline/focus/stream?camera_id=57&mode=processed&fps=30"
+
+# Focus detector proxy (for UI overlay). Body is JPEG/PNG bytes.
+curl -X POST \
+  "http://localhost:8080/api/v1/pipeline/focus/detect?camera_id=57&stream_id=cam-57&imgsz=640&conf=0.25" \
+  --data-binary "@/tmp/frame.jpg"
 ```
+
+## Detector sidecar integration
+
+When `DETECTOR_BASE_URL` points to the Python sidecar (default `http://localhost:8090`),
+the focus UI can render YOLO boxes + detector metrics on the processed canvas.
+
+This path is throttled on the frontend to avoid trying YOLO at full 30 FPS.
 
 Stop pipeline:
 
