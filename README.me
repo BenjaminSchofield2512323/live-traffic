@@ -52,6 +52,8 @@ Base URL: `http://localhost:8080`
   - Running state, camera count, uptime, config summary.
 - `GET /api/v1/pipeline/cameras`
   - Live per-camera processing view (raw + processed frame URLs + metrics).
+- `GET /api/v1/pipeline/focus/stream?camera_id=...&mode=processed|raw&fps=30`
+  - MJPEG focus stream for near-real-time browser viewing (target up to 30fps).
 - `GET /api/v1/alerts?limit=100`
   - Structured incident alerts with evidence links.
 - `GET /artifacts/*`

@@ -175,6 +175,41 @@ func main() {
 		})
 	}))
 
+	mux.HandleFunc("/api/v1/pipeline/focus/stream", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "use GET"})
+			return
+		}
+
+		cameraID := intQuery(r, "camera_id", 0)
+		if cameraID <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
+			return
+		}
+
+		mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+		if mode == "" {
+			mode = "processed"
+		}
+
+		fps := intQuery(r, "fps", 30)
+		if fps < 1 {
+			fps = 1
+		}
+		if fps > 30 {
+			fps = 30
+		}
+
+		pipeline.StreamFocus(w, r, cameraID, mode, fps)
+	})
+
 	mux.HandleFunc("/api/v1/alerts", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		limit := intQuery(r, "limit", 50)
 		if limit < 1 {

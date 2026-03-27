@@ -167,6 +167,13 @@ type pipelineManager struct {
 	cancel   context.CancelFunc
 }
 
+type mjpegStreamType string
+
+const (
+	streamTypeLive      mjpegStreamType = "live"
+	streamTypeProcessed mjpegStreamType = "processed"
+)
+
 func newPipelineManager(logger *slog.Logger, client *ny511Client, artifactDir, webhookURL string) (*pipelineManager, error) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create artifact directory: %w", err)
@@ -288,6 +295,156 @@ func (m *pipelineManager) ListCameraViews() []cameraLiveView {
 		return out[i].LastFrameAt.After(out[j].LastFrameAt)
 	})
 	return out
+}
+
+func (m *pipelineManager) StreamFocus(w http.ResponseWriter, r *http.Request, cameraID int, streamType string, fps int) {
+	sType := mjpegStreamType(strings.ToLower(strings.TrimSpace(streamType)))
+	if sType != streamTypeLive && sType != streamTypeProcessed {
+		sType = streamTypeProcessed
+	}
+	m.serveMJPEG(w, r, cameraID, sType, fps)
+}
+
+func (m *pipelineManager) serveMJPEG(w http.ResponseWriter, r *http.Request, cameraID int, streamType mjpegStreamType, fps int) {
+	if fps < 1 {
+		fps = 1
+	}
+	if fps > 30 {
+		fps = 30
+	}
+	interval := time.Second / time.Duration(fps)
+	if interval <= 0 {
+		interval = 33 * time.Millisecond
+	}
+	// Snapshot endpoints are often updated slower than 30fps, so fetch at a bounded
+	// rate and duplicate latest frame to keep a smooth output cadence.
+	fetchInterval := interval
+	if fetchInterval < 100*time.Millisecond {
+		fetchInterval = 100 * time.Millisecond
+	}
+	if fetchInterval > 1500*time.Millisecond {
+		fetchInterval = 1500 * time.Millisecond
+	}
+	imageURL := m.cameraImageURLByID(cameraID)
+
+	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	ctx := r.Context()
+
+	var (
+		lastSentAt time.Time
+		lastBytes  []byte
+		lastFetch  time.Time
+		prevSmall  []uint8
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now().UTC()
+
+			shouldFetch := len(lastBytes) == 0 || now.Sub(lastFetch) >= fetchInterval
+			if shouldFetch && imageURL != "" {
+				fetchTimeout := 2 * time.Second
+				if interval > 200*time.Millisecond {
+					fetchTimeout = 3 * time.Second
+				}
+				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+				raw, err := m.client.fetchCameraImage(fetchCtx, imageURL)
+				cancel()
+				if err == nil && len(raw) > 0 {
+					lastFetch = now
+					lastSentAt = now
+					if streamType == streamTypeProcessed {
+						metrics := frameMetrics{At: now}
+						if grid, sErr := sampleSmallGray(raw, 64, 36); sErr == nil {
+							metrics.Motion, metrics.Occupancy = deriveMetrics(prevSmall, grid, 64, 36)
+							prevSmall = grid
+						}
+						if processed, pErr := buildProcessedFrame(raw, metrics); pErr == nil && len(processed) > 0 {
+							lastBytes = processed
+						} else {
+							lastBytes = raw
+						}
+					} else {
+						lastBytes = raw
+					}
+				}
+			}
+
+			currentBytes := lastBytes
+			currentAt := lastSentAt
+			if len(currentBytes) == 0 {
+				currentBytes, currentAt = m.latestFrameFor(cameraID, streamType)
+			}
+			if len(currentBytes) == 0 {
+				continue
+			}
+
+			if _, err := fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(currentBytes)); err != nil {
+				return
+			}
+			if _, err := w.Write(currentBytes); err != nil {
+				return
+			}
+			if _, err := w.Write([]byte("\r\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+			lastSentAt = currentAt
+			lastBytes = currentBytes
+		}
+	}
+}
+
+func (m *pipelineManager) latestFrameFor(cameraID int, streamType mjpegStreamType) ([]byte, time.Time) {
+	m.mu.RLock()
+	view, ok := m.views[cameraID]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, time.Time{}
+	}
+	var rel string
+	if streamType == streamTypeProcessed {
+		rel = view.ProcessedImageURL
+	} else {
+		rel = view.LiveImageURL
+	}
+	if rel == "" {
+		return nil, view.LastFrameAt
+	}
+	rel = strings.TrimPrefix(rel, "/artifacts/")
+	path := filepath.Join(m.artifactDir, rel)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, view.LastFrameAt
+	}
+	return b, view.LastFrameAt
+}
+
+func (m *pipelineManager) cameraImageURLByID(cameraID int) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, cam := range m.cameras {
+		if cam.Meta.ID == cameraID && len(cam.Meta.Images) > 0 {
+			return cam.Meta.Images[0].ImageURL
+		}
+	}
+	return ""
 }
 
 func (m *pipelineManager) fetchPipelineCameras(ctx context.Context, count int) ([]*cameraState, error) {

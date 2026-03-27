@@ -27,6 +27,7 @@ Uses 511NY endpoint flow (same path behind "Show Video"), not HTML scraping:
 - `POST /api/v1/pipeline/stop`
 - `GET /api/v1/pipeline/status`
 - `GET /api/v1/pipeline/cameras`
+- `GET /api/v1/pipeline/focus/stream?camera_id=<id>&mode=processed|raw&fps=30`
 - `GET /api/v1/alerts?limit=100`
 - `GET /artifacts/...` (evidence files)
 
@@ -69,6 +70,9 @@ curl "http://localhost:8080/api/v1/alerts?limit=20"
 
 # Camera live-processing views (raw + processed frame URLs)
 curl "http://localhost:8080/api/v1/pipeline/cameras"
+
+# Focus stream (MJPEG, defaults to processed mode and 30 FPS cap)
+curl "http://localhost:8080/api/v1/pipeline/focus/stream?camera_id=57&mode=processed&fps=30"
 ```
 
 Stop pipeline:

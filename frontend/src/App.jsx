@@ -20,6 +20,7 @@ function App() {
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [focusFPS, setFocusFPS] = useState(30)
 
   const totalFeeds = useMemo(() => recommended.length, [recommended])
   const totalAlerts = useMemo(() => alerts.length, [alerts])
@@ -226,18 +227,34 @@ function App() {
       <section className="focusPanel">
         <div className="focusHeader">
           <h2>Focused Live Processing</h2>
-          <select
-            value={focusCameraID ?? ''}
-            onChange={(e) => setFocusCameraID(Number(e.target.value))}
-            disabled={!cameraViews.length}
-          >
-            {!cameraViews.length && <option value="">No active camera views</option>}
-            {cameraViews.map((v) => (
-              <option key={v.camera_id} value={v.camera_id}>
-                {v.roadway || `Camera ${v.camera_id}`} - {v.location || 'Unknown location'}
-              </option>
-            ))}
-          </select>
+          <div className="focusControls">
+            <select
+              value={focusCameraID ?? ''}
+              onChange={(e) => setFocusCameraID(Number(e.target.value))}
+              disabled={!cameraViews.length}
+            >
+              {!cameraViews.length && <option value="">No active camera views</option>}
+              {cameraViews.map((v) => (
+                <option key={v.camera_id} value={v.camera_id}>
+                  {v.roadway || `Camera ${v.camera_id}`} - {v.location || 'Unknown location'}
+                </option>
+              ))}
+            </select>
+            <label className="fpsLabel">
+              FPS
+              <input
+                type="number"
+                min="1"
+                max="30"
+                value={focusFPS}
+                onChange={(e) => {
+                  const next = Number(e.target.value)
+                  if (Number.isNaN(next)) return
+                  setFocusFPS(Math.max(1, Math.min(30, next)))
+                }}
+              />
+            </label>
+          </div>
         </div>
         {focusedView ? (
           <>
@@ -246,7 +263,7 @@ function App() {
                 <h3>Live frame</h3>
                 {focusedView.live_image_url ? (
                   <img
-                    src={`${apiBase}${focusedView.live_image_url}?t=${Date.now()}`}
+                    src={`${apiBase}/api/v1/focus/stream?camera_id=${focusedView.camera_id}&mode=raw&fps=${focusFPS}`}
                     alt="live camera frame"
                   />
                 ) : (
@@ -257,7 +274,7 @@ function App() {
                 <h3>Processed frame</h3>
                 {focusedView.processed_image_url ? (
                   <img
-                    src={`${apiBase}${focusedView.processed_image_url}?t=${Date.now()}`}
+                    src={`${apiBase}/api/v1/focus/stream?camera_id=${focusedView.camera_id}&mode=processed&fps=${focusFPS}`}
                     alt="processed camera frame"
                   />
                 ) : (
