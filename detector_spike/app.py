@@ -543,6 +543,7 @@ async def detect(
 
     detections: list[dict[str, Any]] = []
     mature_roi_tracks: list[dict[str, Any]] = []
+    tracks_out: list[dict[str, Any]] = []
     lane_counts: dict[str, int] = {}
     moving_count = 0
     stopped_like = False
@@ -581,6 +582,7 @@ async def detect(
             "is_mature": bool(t["is_mature"]),
             "stopped_for_s": stopped_for,
         }
+        tracks_out.append(track_payload)
 
         detections.append(
             {
@@ -635,7 +637,7 @@ async def detect(
         "ts_unix_ms": frame_ts_unix_ms,
         # Backward compatible payload used by current UI.
         "detections": detections,
-        # New richer tracking contract for downstream analytics.
+        # New richer tracking contract for downstream analytics (always geometry-enriched).
         "tracks": [
             {
                 "track_id": t["track_id"],
@@ -651,7 +653,7 @@ async def detect(
                 "in_roi": t["in_roi"],
                 "stopped_for_s": t["stopped_for_s"],
             }
-            for t in (mature_roi_tracks if mature_roi_tracks else tracks)
+            for t in tracks_out
         ],
         "metrics": {
             "occupancy_ratio": occupancy_ratio,

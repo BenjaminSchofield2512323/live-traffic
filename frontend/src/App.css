@@ -1,10 +1,338 @@
+:root {
+  --bg: #f1f5f9;
+  --surface: #ffffff;
+  --surface2: #f8fafc;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --textMuted: #64748b;
+  --textSoft: #475569;
+  --accent: #0d9488;
+  --accentSoft: rgba(13, 148, 136, 0.12);
+  --danger: #b91c1c;
+  --radius: 12px;
+  --radiusSm: 8px;
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadowMd: 0 4px 14px rgba(15, 23, 42, 0.06);
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
 .app {
-  max-width: 1200px;
+  max-width: 1120px;
   margin: 0 auto;
-  padding: 1.25rem;
+  padding: 1.5rem 1.25rem 2.5rem;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.75rem;
+}
+
+.appEyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.appHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.25rem;
+  padding: 1.25rem 1.35rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.appHeaderText h1 {
+  margin: 0;
+  font-size: 1.65rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.sectionHeading {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--textSoft);
+}
+
+.metricsSection,
+.signalSection,
+.alertsSection,
+.recommendedSection {
+  margin: 0;
+}
+
+.signalSection {
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.signalChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.signalChip {
+  display: inline-block;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--textSoft);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.btn {
+  border: none;
+  border-radius: var(--radiusSm);
+  padding: 0.55rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btnPrimary {
+  background: var(--text);
+  color: #fff;
+}
+
+.btnPrimary:hover:not(:disabled) {
+  background: #1e293b;
+}
+
+.btnSecondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btnSecondary:hover:not(:disabled) {
+  background: var(--surface2);
+}
+
+.btnDanger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btnDanger:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.metricCardTitle {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--textSoft);
+  letter-spacing: 0.02em;
+}
+
+.emptyState {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 1.25rem;
+  text-align: center;
+  color: var(--textMuted);
+  font-size: 0.95rem;
+  background: var(--surface2);
+  border-radius: var(--radiusSm);
+  border: 1px dashed var(--border);
+}
+
+.focusPanelHeader {
+  margin-bottom: 1rem;
+}
+
+.focusPanelHeader h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.focusPanelLead {
+  margin: 0.35rem 0 0;
+  font-size: 0.9rem;
+  color: var(--textMuted);
+  line-height: 1.45;
+}
+
+.focusSubheading {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--textSoft);
+}
+
+.focusSnapshotsRow {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+@media (max-width: 640px) {
+  .focusSnapshotsRow {
+    grid-template-columns: 1fr;
+  }
+}
+
+.focusCardSnapshot h3 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--textSoft);
+  margin: 0 0 0.5rem;
+}
+
+.focusSnapshotFrame {
+  border-radius: var(--radiusSm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #0f172a;
+  aspect-ratio: 16 / 10;
+}
+
+.focusSnapshotFrame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.focusDetailCard {
+  margin-top: 1rem;
+  padding: 1rem 1.1rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radiusSm);
+}
+
+.focusMetaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem 1.25rem;
+  margin: 0;
+}
+
+.focusMetaGrid div {
+  margin: 0;
+}
+
+.focusMetaGrid dt {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--textMuted);
+}
+
+.focusMetaGrid dd {
+  margin: 0.2rem 0 0;
+  font-size: 0.9rem;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.focusMetricsStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.focusMetricPill {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem 0.65rem;
+  min-width: 5.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radiusSm);
+}
+
+.focusMetricLabel {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--textMuted);
+}
+
+.focusMetricValue {
+  font-size: 0.88rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.focusStreamLink {
+  display: inline-block;
+  margin-top: 0.85rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.focusStreamLink:hover {
+  text-decoration: underline;
+}
+
+.focusGridLive {
+  margin-top: 0.35rem;
+}
+
+.focusCardLive h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--textSoft);
+  margin: 0 0 0.5rem;
+}
+
+.focusCardLiveProcessed {
+  position: relative;
+}
+
+.focusFrameCanvasProcessed {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: var(--radiusSm);
+  border: 1px solid var(--border);
 }
 
 .topbar {
@@ -250,8 +578,11 @@
 }
 
 .sub {
-  color: #475569;
-  margin: 0.3rem 0 0;
+  color: var(--textMuted);
+  margin: 0.35rem 0 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  max-width: 42rem;
 }
 
 .buttonRow {
@@ -287,16 +618,15 @@
 }
 
 .metricCard {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #fff;
-  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.95rem 1rem;
+  box-shadow: var(--shadow);
 }
 
-.metricCard h2 {
+.metricCard .metricCardTitle {
   margin: 0;
-  font-size: 0.95rem;
-  color: #334155;
 }
 
 .metricValue {
@@ -315,7 +645,7 @@
 }
 
 .metricCard small {
-  color: #64748b;
+  color: var(--textMuted);
 }
 
 .cameraGrid {
@@ -325,10 +655,11 @@
 }
 
 .cameraCard {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
   overflow: hidden;
+  box-shadow: var(--shadow);
 }
 
 .cameraCard img {
@@ -365,10 +696,11 @@
 }
 
 .focusPanel {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #fff;
-  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 1.15rem 1.25rem 1.35rem;
+  box-shadow: var(--shadowMd);
 }
 
 .focusHeader {
@@ -383,8 +715,36 @@
 .focusControls {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-end;
   gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.focusControl {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--textSoft);
+}
+
+.focusControl select,
+.focusControl input {
+  min-width: 7rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radiusSm);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
+.focusHint {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
+  color: #64748b;
+  line-height: 1.35;
 }
 
 .fpsLabel {

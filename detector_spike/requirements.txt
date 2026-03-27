@@ -4,3 +4,5 @@ opencv-python-headless
 requests
 ultralytics
 uvicorn
+# Ultralytics trackers (BoT-SORT / ByteTrack) import `lap` for assignment; not always pulled in as a transitive dep.
+lap>=0.5.12

@@ -21,6 +21,7 @@ const (
 	defaultBaseURL         = "https://511ny.org"
 	defaultUserAgent       = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 	defaultDetectorBaseURL = "http://localhost:8090"
+	defaultArtifactDir     = "artifacts"
 
 	defaultRecommendedCameraCount = 10
 	minRecommendedCameraCount     = 5
@@ -53,8 +54,14 @@ func main() {
 		logger.Error("failed to create 511 client", "error", err)
 		os.Exit(1)
 	}
+	artifactDir := envOrDefault("ARTIFACT_DIR", defaultArtifactDir)
+	webhookURL := envOrDefault("WEBHOOK_URL", "")
+	pipeline, err := newPipelineManager(logger, client, artifactDir, webhookURL)
+	if err != nil {
+		logger.Error("failed to create pipeline manager", "error", err)
+		os.Exit(1)
+	}
 	detector := newDetectorClient(detectorBaseURL)
-	pipeline := newPipelineRuntime(client, detector, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", withCORS(func(w http.ResponseWriter, _ *http.Request) {
@@ -114,10 +121,6 @@ func main() {
 			"data":            recommended,
 		})
 	}))
-
-	mux.HandleFunc("/api/v1/pipeline/start", withCORS(pipeline.handleStart))
-	mux.HandleFunc("/api/v1/pipeline/focus/stream", withCORS(pipeline.handleFocusStream))
-	mux.HandleFunc("/api/v1/pipeline/focus/detect", withCORS(pipeline.handleFocusDetect))
 
 	mux.HandleFunc("/api/v1/analysis/plan", withCORS(func(w http.ResponseWriter, _ *http.Request) {
 		// V1 keeps detection lightweight and explainable before heavier CV models.
@@ -279,9 +282,12 @@ func main() {
 			q.Set("conf", "0.25")
 		}
 
+		dq := parseDetectQuery(r)
+		dq.ExtraQuery = r.URL.Query()
+
 		detectCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 		defer cancel()
-		payload, err := detector.Detect(detectCtx, imageBytes, q)
+		payload, err := detector.Detect(detectCtx, imageBytes, dq)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return

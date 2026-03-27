@@ -5,6 +5,21 @@ import { deriveMetrics, drawProcessedOverlay, imageDataToGray } from './focusFra
 const MW = 64
 const MH = 36
 
+/** Flat detector JSON or legacy `{ detector: { ... } }` wrapper from older proxies. */
+function normalizeDetectorPayload(p) {
+  if (!p || typeof p !== 'object') {
+    return { image: null, detections: [] }
+  }
+  const inner = p.detector && typeof p.detector === 'object' ? p.detector : p
+  const image = inner.image ?? p.image
+  const detections = Array.isArray(inner.detections)
+    ? inner.detections
+    : Array.isArray(p.detections)
+      ? p.detections
+      : []
+  return { image, detections }
+}
+
 function absolutize511StreamUrl(u) {
   if (!u) return ''
   const s = String(u).trim()
@@ -129,7 +144,7 @@ export function FocusStreamFrames({
 
     const ctxM = metricsCanvas.getContext('2d', { willReadFrequently: true })
     const intervalMs = 1000 / Math.max(1, Math.min(30, fps))
-    const boundedDetectorFPS = Math.max(1, Math.min(10, Number(detectorFPS) || 2))
+    const boundedDetectorFPS = Math.max(1, Math.min(30, Number(detectorFPS) || 2))
     const detectorIntervalMs = 1000 / boundedDetectorFPS
 
     const tick = (now) => {
@@ -172,10 +187,11 @@ export function FocusStreamFrames({
       prevGrayRef.current = gray
 
       drawProcessedOverlay(procCtx, dw, dh, motion, occupancy)
-      const detectorPayload = latestDetectionRef.current
-      if (detectorPayload?.image && Array.isArray(detectorPayload.detections)) {
-        const detW = Number(detectorPayload.image.width || 0) || dw
-        const detH = Number(detectorPayload.image.height || 0) || dh
+      const rawPayload = latestDetectionRef.current
+      const { image: detImage, detections: detList } = normalizeDetectorPayload(rawPayload)
+      if (Array.isArray(detList) && detList.length > 0) {
+        const detW = Number(detImage?.width || 0) || dw
+        const detH = Number(detImage?.height || 0) || dh
         const sx = detW > 0 ? dw / detW : 1
         const sy = detH > 0 ? dh / detH : 1
 
@@ -183,7 +199,7 @@ export function FocusStreamFrames({
         procCtx.strokeStyle = 'rgba(45,210,80,0.95)'
         procCtx.font = '12px sans-serif'
         procCtx.fillStyle = 'rgba(45,210,80,0.95)'
-        detectorPayload.detections.forEach((d) => {
+        detList.forEach((d) => {
           if (!Array.isArray(d.bbox) || d.bbox.length < 4) return
           const [x1, y1, x2, y2] = d.bbox
           const bx = x1 * sx
@@ -191,7 +207,9 @@ export function FocusStreamFrames({
           const bw = Math.max(1, (x2 - x1) * sx)
           const bh = Math.max(1, (y2 - y1) * sy)
           procCtx.strokeRect(bx, by, bw, bh)
-          const tag = `${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
+          const lane =
+            d.lane_id != null && String(d.lane_id).trim() !== '' ? `${String(d.lane_id)} ` : ''
+          const tag = `${lane}${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
           procCtx.fillText(tag, bx + 2, Math.max(12, by - 3))
         })
       }
@@ -199,7 +217,6 @@ export function FocusStreamFrames({
 
       const shouldDetect =
         cameraID &&
-        apiBase &&
         !detectInflightRef.current &&
         now - lastDetectAtRef.current >= detectorIntervalMs
       if (shouldDetect) {
@@ -256,14 +273,14 @@ export function FocusStreamFrames({
       <canvas ref={metricsCanvasRef} className="focusMetricsCanvas" aria-hidden />
       {hlsError && <p className="focusHlsError">{hlsError}</p>}
       {!streamReady && !hlsError && <p className="focusPlaceholder">Connecting to stream…</p>}
-      <div className="focusGrid">
-        <div className="focusCard">
-          <h3>Raw (from stream)</h3>
+      <div className="focusGrid focusGridLive">
+        <div className="focusCard focusCardLive">
+          <h3>Raw (stream)</h3>
           <canvas ref={rawRef} className="focusFrameCanvas" />
         </div>
-        <div className="focusCard">
-          <h3>Processed (overlay)</h3>
-          <canvas ref={procRef} className="focusFrameCanvas" />
+        <div className="focusCard focusCardLive focusCardLiveProcessed">
+          <h3>Processed (YOLO)</h3>
+          <canvas ref={procRef} className="focusFrameCanvas focusFrameCanvasProcessed" />
         </div>
       </div>
     </div>
