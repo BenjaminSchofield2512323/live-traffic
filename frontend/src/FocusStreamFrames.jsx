@@ -9,6 +9,33 @@ const ASSOC_COMPARISON_MODES = [
   { key: 'hungarian', hungarianEnabled: true },
 ]
 
+/**
+ * Map pointer coordinates to canvas bitmap pixels when the element is CSS-sized with
+ * `object-fit: contain` (letterboxing). Clicks on the padded bands must not map to the image.
+ */
+function clientPointToCanvasPixels(canvas, clientX, clientY) {
+  const rect = canvas.getBoundingClientRect()
+  const iw = canvas.width
+  const ih = canvas.height
+  if (rect.width <= 0 || rect.height <= 0 || iw <= 0 || ih <= 0) return null
+  const sx = clientX - rect.left
+  const sy = clientY - rect.top
+  const scale = Math.min(rect.width / iw, rect.height / ih)
+  const dispW = iw * scale
+  const dispH = ih * scale
+  const offX = (rect.width - dispW) / 2
+  const offY = (rect.height - dispH) / 2
+  const lx = sx - offX
+  const ly = sy - offY
+  if (lx < 0 || ly < 0 || lx > dispW || ly > dispH) return null
+  const px = (lx / dispW) * iw
+  const py = (ly / dispH) * ih
+  return {
+    x: Math.max(0, Math.min(iw - 1, Math.round(px))),
+    y: Math.max(0, Math.min(ih - 1, Math.round(py))),
+  }
+}
+
 /** Flat detector JSON or legacy `{ detector: { ... } }` wrapper from older proxies. */
 function normalizeDetectorPayload(p) {
   if (!p || typeof p !== 'object') {
@@ -250,13 +277,9 @@ export function FocusStreamFrames({
     if (!laneEditMode) return
     const proc = procLegacyRef.current
     if (!proc) return
-    const rect = proc.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) return
-    const x = ((evt.clientX - rect.left) / rect.width) * proc.width
-    const y = ((evt.clientY - rect.top) / rect.height) * proc.height
-    const px = Math.max(0, Math.min(proc.width - 1, Math.round(x)))
-    const py = Math.max(0, Math.min(proc.height - 1, Math.round(y)))
-    draftPolyRef.current = [...draftPolyRef.current, [px, py]]
+    const pt = clientPointToCanvasPixels(proc, evt.clientX, evt.clientY)
+    if (!pt) return
+    draftPolyRef.current = [...draftPolyRef.current, [pt.x, pt.y]]
     setLaneEditError('')
   }
 

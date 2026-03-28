@@ -835,11 +835,18 @@ body {
 
 .focusStreamFrames {
   position: relative;
+  /* Ultra-wide camera frames were stretching edge-to-edge; cap width and center. */
+  max-width: min(100%, 960px);
+  margin-inline: auto;
 }
 
 .focusFrameCanvas {
   width: 100%;
-  max-height: 320px;
+  max-width: 100%;
+  max-height: min(38vh, 320px);
+  height: auto;
+  object-fit: contain;
+  object-position: center;
   background: #0f172a;
   border-radius: 8px;
   display: block;
