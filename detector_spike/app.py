@@ -158,6 +158,7 @@ class TrackMemory:
     first_seen_ts: float = 0.0
     last_seen_ts: float = 0.0
     last_bbox: tuple[float, float, float, float] | None = None
+    smoothed_bbox: tuple[float, float, float, float] | None = None
     # ts, cx, cy, projection_along_direction
     samples: deque[tuple[float, float, float, float]] = field(default_factory=deque)
     low_speed_since_ts: float | None = None
@@ -177,11 +178,19 @@ class StreamRuntime:
 
 
 class MOTStateStore:
-    def __init__(self, track_max_age_sec: float, smooth_window_sec: float, min_hits: int, assoc_iou_threshold: float) -> None:
+    def __init__(
+        self,
+        track_max_age_sec: float,
+        smooth_window_sec: float,
+        min_hits: int,
+        assoc_iou_threshold: float,
+        bbox_ema_alpha: float,
+    ) -> None:
         self.track_max_age_sec = track_max_age_sec
         self.smooth_window_sec = smooth_window_sec
         self.min_hits = max(1, min_hits)
         self.assoc_iou_threshold = max(0.0, min(0.95, assoc_iou_threshold))
+        self.bbox_ema_alpha = max(0.0, min(1.0, bbox_ema_alpha))
         self._lock = threading.Lock()
         self._streams: dict[str, StreamRuntime] = {}
 
@@ -233,10 +242,18 @@ class MOTStateStore:
 
                 x1, y1, x2, y2 = det["bbox"]
                 mem.last_bbox = (float(x1), float(y1), float(x2), float(y2))
-                cx = float((x1 + x2) / 2.0)
-                cy = float((y1 + y2) / 2.0)
+                if mem.smoothed_bbox is None:
+                    mem.smoothed_bbox = mem.last_bbox
+                else:
+                    mem.smoothed_bbox = self._smooth_bbox(
+                        prev=mem.smoothed_bbox,
+                        current=mem.last_bbox,
+                    )
+                sx1, sy1, sx2, sy2 = mem.smoothed_bbox
+                cx = float((sx1 + sx2) / 2.0)
+                cy = float((sy1 + sy2) / 2.0)
                 bcx = cx
-                bcy = float(y2)
+                bcy = float(sy2)
                 projection = bcx * direction[0] + bcy * direction[1]
                 mem.samples.append((now_ts, bcx, bcy, projection))
                 self._trim_samples(mem, now_ts)
@@ -253,7 +270,8 @@ class MOTStateStore:
                 out.append(
                     {
                         "track_id": local_track_id,
-                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                        "bbox": [float(sx1), float(sy1), float(sx2), float(sy2)],
+                        "bbox_raw": [float(x1), float(y1), float(x2), float(y2)],
                         "class_name": det["class_name"],
                         "class_id": int(det["class_id"]),
                         "confidence": float(det["confidence"]),
@@ -300,6 +318,25 @@ class MOTStateStore:
         t1, _, _, p1 = mem.samples[-1]
         dt = max(1e-3, t1 - t0)
         return (p1 - p0) / dt
+
+    def _smooth_bbox(
+        self,
+        prev: tuple[float, float, float, float],
+        current: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float]:
+        a = self.bbox_ema_alpha
+        if a <= 0.0:
+            return current
+        if a >= 1.0:
+            return prev
+        px1, py1, px2, py2 = prev
+        cx1, cy1, cx2, cy2 = current
+        return (
+            (1.0 - a) * cx1 + a * px1,
+            (1.0 - a) * cy1 + a * py1,
+            (1.0 - a) * cx2 + a * px2,
+            (1.0 - a) * cy2 + a * py2,
+        )
 
     def _associate_by_iou(
         self,
@@ -734,6 +771,26 @@ def _poly_to_points(poly: np.ndarray) -> list[list[int]]:
     return [[int(p[0]), int(p[1])] for p in poly.tolist()]
 
 
+def _apply_night_enhancement(image: np.ndarray) -> np.ndarray:
+    if not NIGHT_ENHANCE_ENABLED:
+        return image
+    if image.size == 0:
+        return image
+    try:
+        luma = float(np.mean(image[:, :, 0] * 0.114 + image[:, :, 1] * 0.587 + image[:, :, 2] * 0.299))
+    except Exception:
+        return image
+    if luma >= NIGHT_LUMA_THRESHOLD:
+        return image
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_chan, a_chan, b_chan = cv2.split(lab)
+    tile = max(2, NIGHT_CLAHE_TILE_SIZE)
+    clahe = cv2.createCLAHE(clipLimit=max(1.0, NIGHT_CLAHE_CLIP_LIMIT), tileGridSize=(tile, tile))
+    l_eq = clahe.apply(l_chan)
+    merged = cv2.merge((l_eq, a_chan, b_chan))
+    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+
 TRACK_MAX_AGE_SEC = _env_float("DETECTOR_TRACK_MAX_AGE_SEC", 4.0)
 TRACK_MIN_HITS = _env_int("DETECTOR_TRACK_MIN_HITS", 2)
 SMOOTH_WINDOW_SEC = _env_float("DETECTOR_SMOOTH_WINDOW_SEC", 1.0)
@@ -744,6 +801,11 @@ QUEUE_OCCUPANCY_THRESHOLD = _env_float("DETECTOR_QUEUE_OCCUPANCY_THRESHOLD", 0.1
 QUEUE_MIN_TRACKS = _env_int("DETECTOR_QUEUE_MIN_TRACKS", 4)
 TRACKER_CONFIG = os.getenv("DETECTOR_TRACKER_CONFIG", "bytetrack.yaml").strip() or "bytetrack.yaml"
 TRACK_ASSOC_IOU_THRESHOLD = _env_float("DETECTOR_TRACK_ASSOC_IOU_THRESHOLD", 0.25)
+BBOX_EMA_ALPHA = _env_float("DETECTOR_BBOX_EMA_ALPHA", 0.45)
+NIGHT_ENHANCE_ENABLED = _env_bool("DETECTOR_NIGHT_ENHANCE_ENABLED", True)
+NIGHT_LUMA_THRESHOLD = _env_float("DETECTOR_NIGHT_LUMA_THRESHOLD", 90.0)
+NIGHT_CLAHE_CLIP_LIMIT = _env_float("DETECTOR_NIGHT_CLAHE_CLIP_LIMIT", 2.0)
+NIGHT_CLAHE_TILE_SIZE = _env_int("DETECTOR_NIGHT_CLAHE_TILE_SIZE", 8)
 DEFAULT_DEBUG_OVERLAY = _env_bool("DETECTOR_DEBUG_OVERLAY_DEFAULT", False)
 
 app = FastAPI(title="Traffic Detector Spike", version="0.2.0")
@@ -755,6 +817,7 @@ mot_state = MOTStateStore(
     smooth_window_sec=max(0.25, SMOOTH_WINDOW_SEC),
     min_hits=TRACK_MIN_HITS,
     assoc_iou_threshold=TRACK_ASSOC_IOU_THRESHOLD,
+    bbox_ema_alpha=BBOX_EMA_ALPHA,
 )
 inference_lock = threading.Lock()
 
@@ -770,7 +833,12 @@ def health() -> dict[str, Any]:
         "track_max_age_sec": TRACK_MAX_AGE_SEC,
         "track_min_hits": TRACK_MIN_HITS,
         "track_assoc_iou_threshold": TRACK_ASSOC_IOU_THRESHOLD,
+        "track_bbox_ema_alpha": BBOX_EMA_ALPHA,
         "smooth_window_sec": SMOOTH_WINDOW_SEC,
+        "night_enhance_enabled": NIGHT_ENHANCE_ENABLED,
+        "night_luma_threshold": NIGHT_LUMA_THRESHOLD,
+        "night_clahe_clip_limit": NIGHT_CLAHE_CLIP_LIMIT,
+        "night_clahe_tile_size": NIGHT_CLAHE_TILE_SIZE,
         "roi_config_loaded": loaded_ok,
         "lane_geometry_source": ROI_CONFIG.source,
         "lane_geometry_schema_version": ROI_CONFIG.schema_version,
@@ -804,6 +872,7 @@ async def detect(
     image = cv2.imdecode(np_bytes, cv2.IMREAD_COLOR)
     if image is None:
         raise HTTPException(status_code=400, detail="failed to decode image bytes")
+    inference_image = _apply_night_enhancement(image)
 
     height, width = image.shape[:2]
     geom = _resolve_geometry(stream_id=stream_id, width=width, height=height, roi_query=roi, direction_query=direction, lanes_query=lanes)
@@ -811,7 +880,7 @@ async def detect(
     t0 = time.perf_counter()
     with inference_lock:
         results = model.track(
-            source=image,
+            source=inference_image,
             conf=conf,
             iou=iou,
             imgsz=imgsz,
