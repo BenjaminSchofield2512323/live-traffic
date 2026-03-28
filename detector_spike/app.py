@@ -157,6 +157,7 @@ class TrackMemory:
     hits: int = 0
     first_seen_ts: float = 0.0
     last_seen_ts: float = 0.0
+    last_bbox: tuple[float, float, float, float] | None = None
     # ts, cx, cy, projection_along_direction
     samples: deque[tuple[float, float, float, float]] = field(default_factory=deque)
     low_speed_since_ts: float | None = None
@@ -176,10 +177,11 @@ class StreamRuntime:
 
 
 class MOTStateStore:
-    def __init__(self, track_max_age_sec: float, smooth_window_sec: float, min_hits: int) -> None:
+    def __init__(self, track_max_age_sec: float, smooth_window_sec: float, min_hits: int, assoc_iou_threshold: float) -> None:
         self.track_max_age_sec = track_max_age_sec
         self.smooth_window_sec = smooth_window_sec
         self.min_hits = max(1, min_hits)
+        self.assoc_iou_threshold = max(0.0, min(0.95, assoc_iou_threshold))
         self._lock = threading.Lock()
         self._streams: dict[str, StreamRuntime] = {}
 
@@ -203,11 +205,17 @@ class MOTStateStore:
                 local_track_id = None
                 if isinstance(raw_track_id, int):
                     local_track_id = runtime.raw_to_local.get(raw_track_id)
-                    if local_track_id is None:
-                        local_track_id = runtime.alloc_track_id()
-                        runtime.raw_to_local[raw_track_id] = local_track_id
+                if local_track_id is None:
+                    local_track_id = self._associate_by_iou(
+                        runtime=runtime,
+                        bbox=det["bbox"],
+                        seen_local_ids=seen_local_ids,
+                        now_ts=now_ts,
+                    )
                 if local_track_id is None:
                     local_track_id = runtime.alloc_track_id()
+                if isinstance(raw_track_id, int):
+                    runtime.raw_to_local[raw_track_id] = local_track_id
 
                 mem = runtime.tracks.get(local_track_id)
                 if mem is None:
@@ -224,6 +232,7 @@ class MOTStateStore:
                 mem.last_seen_ts = now_ts
 
                 x1, y1, x2, y2 = det["bbox"]
+                mem.last_bbox = (float(x1), float(y1), float(x2), float(y2))
                 cx = float((x1 + x2) / 2.0)
                 cy = float((y1 + y2) / 2.0)
                 bcx = cx
@@ -291,6 +300,49 @@ class MOTStateStore:
         t1, _, _, p1 = mem.samples[-1]
         dt = max(1e-3, t1 - t0)
         return (p1 - p0) / dt
+
+    def _associate_by_iou(
+        self,
+        runtime: StreamRuntime,
+        bbox: list[float],
+        seen_local_ids: set[int],
+        now_ts: float,
+    ) -> int | None:
+        best_local_id: int | None = None
+        best_iou = 0.0
+        for local_id, mem in runtime.tracks.items():
+            if local_id in seen_local_ids:
+                continue
+            if now_ts - mem.last_seen_ts > self.track_max_age_sec:
+                continue
+            if mem.last_bbox is None:
+                continue
+            iou = self._bbox_iou(mem.last_bbox, bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_local_id = local_id
+        if best_local_id is not None and best_iou >= self.assoc_iou_threshold:
+            return best_local_id
+        return None
+
+    def _bbox_iou(self, a: tuple[float, float, float, float], b: list[float]) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = [float(v) for v in b]
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        iw = max(0.0, ix2 - ix1)
+        ih = max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        denom = area_a + area_b - inter
+        if denom <= 1e-6:
+            return 0.0
+        return inter / denom
 
     def _prune_stale(self, runtime: StreamRuntime, now_ts: float) -> None:
         stale_local_ids = [tid for tid, mem in runtime.tracks.items() if now_ts - mem.last_seen_ts > self.track_max_age_sec]
@@ -691,6 +743,7 @@ QUEUE_SPEED_THRESHOLD_PX_S = _env_float("DETECTOR_QUEUE_SPEED_THRESHOLD_PX_S", 8
 QUEUE_OCCUPANCY_THRESHOLD = _env_float("DETECTOR_QUEUE_OCCUPANCY_THRESHOLD", 0.18)
 QUEUE_MIN_TRACKS = _env_int("DETECTOR_QUEUE_MIN_TRACKS", 4)
 TRACKER_CONFIG = os.getenv("DETECTOR_TRACKER_CONFIG", "bytetrack.yaml").strip() or "bytetrack.yaml"
+TRACK_ASSOC_IOU_THRESHOLD = _env_float("DETECTOR_TRACK_ASSOC_IOU_THRESHOLD", 0.25)
 DEFAULT_DEBUG_OVERLAY = _env_bool("DETECTOR_DEBUG_OVERLAY_DEFAULT", False)
 
 app = FastAPI(title="Traffic Detector Spike", version="0.2.0")
@@ -701,6 +754,7 @@ mot_state = MOTStateStore(
     track_max_age_sec=TRACK_MAX_AGE_SEC,
     smooth_window_sec=max(0.25, SMOOTH_WINDOW_SEC),
     min_hits=TRACK_MIN_HITS,
+    assoc_iou_threshold=TRACK_ASSOC_IOU_THRESHOLD,
 )
 inference_lock = threading.Lock()
 
@@ -715,6 +769,7 @@ def health() -> dict[str, Any]:
         "tracker": TRACKER_CONFIG,
         "track_max_age_sec": TRACK_MAX_AGE_SEC,
         "track_min_hits": TRACK_MIN_HITS,
+        "track_assoc_iou_threshold": TRACK_ASSOC_IOU_THRESHOLD,
         "smooth_window_sec": SMOOTH_WINDOW_SEC,
         "roi_config_loaded": loaded_ok,
         "lane_geometry_source": ROI_CONFIG.source,
