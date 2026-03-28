@@ -75,12 +75,17 @@ function App() {
   const [laneGeometryByCamera, setLaneGeometryByCamera] = useState(() => loadLaneGeometryFromStorage())
   const [laneEditMode, setLaneEditMode] = useState(false)
   const [laneFlowStats, setLaneFlowStats] = useState({ totalPerMin: 0, perLane: {} })
+  const [trackedEntities, setTrackedEntities] = useState([])
   const flowStateRef = useRef({})
+  const overlayIDMapRef = useRef({})
 
   /** Focus canvas POSTs to /focus/detect; sync metrics cards + lane counts from the same payload the overlay uses. */
   const onDetectionMetrics = useCallback((payload) => {
     setDetectorMetrics(payload)
-    if (!payload) return
+    if (!payload) {
+      setTrackedEntities([])
+      return
+    }
     const metrics = payload.metrics || {}
     const detections = Array.isArray(payload.detections) ? payload.detections : []
     const tracks = Array.isArray(payload.tracks) ? payload.tracks : []
@@ -132,6 +137,43 @@ function App() {
       ? Object.values(perLane).reduce((acc, n) => acc + Number(n || 0), 0)
       : 0
     setLaneFlowStats({ totalPerMin, perLane })
+
+    const nextIDMap = { ...overlayIDMapRef.current }
+    let alphaIndex = Object.keys(nextIDMap).length
+    const toAlpha = (idx) => {
+      let n = idx
+      let out = ''
+      do {
+        out = String.fromCharCode(65 + (n % 26)) + out
+        n = Math.floor(n / 26) - 1
+      } while (n >= 0)
+      return out
+    }
+    const entities = tracks
+      .filter((t) => t?.track_id != null)
+      .map((t) => {
+        const trackKey = String(t.track_id)
+        if (!nextIDMap[trackKey]) {
+          nextIDMap[trackKey] = toAlpha(alphaIndex)
+          alphaIndex += 1
+        }
+        const detMatch = detections.find((d) => Number(d.track_id) === Number(t.track_id))
+        const cls = String(detMatch?.class_name || t.class_name || 'unknown')
+        const confidence = Number(detMatch?.confidence ?? t.confidence ?? 0)
+        const speedPxS = Number(t.speed_px_s ?? 0)
+        return {
+          track_id: Number(t.track_id),
+          overlay_id: nextIDMap[trackKey],
+          class_name: cls,
+          lane_id: t.lane_id ?? null,
+          speed_px_s: speedPxS,
+          confidence,
+          is_moving: speedPxS >= 12.0,
+        }
+      })
+      .sort((a, b) => a.overlay_id.localeCompare(b.overlay_id))
+    overlayIDMapRef.current = nextIDMap
+    setTrackedEntities(entities)
 
     setDetectStatus((prev) => ({
       ...prev,
@@ -317,6 +359,8 @@ function App() {
   useEffect(() => {
     setDetectorMetrics(null)
     setLaneFlowStats({ totalPerMin: 0, perLane: {} })
+    setTrackedEntities([])
+    overlayIDMapRef.current = {}
     setLaneEditMode(false)
   }, [focusCameraID, focusedView?.stream_url])
 

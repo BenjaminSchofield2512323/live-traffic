@@ -20,6 +20,19 @@ function normalizeDetectorPayload(p) {
   return { image, detections }
 }
 
+function trackNumberToLabel(trackID) {
+  const n = Number(trackID)
+  if (!Number.isFinite(n) || n < 1) return String(trackID ?? '?')
+  let x = Math.floor(n)
+  let label = ''
+  while (x > 0) {
+    const rem = (x - 1) % 26
+    label = String.fromCharCode(65 + rem) + label
+    x = Math.floor((x - 1) / 26)
+  }
+  return label || String(trackID)
+}
+
 function drawLanePolygons(ctx, payload, dw, dh) {
   const geometry = payload?.geometry ?? payload?.detector?.geometry
   if (!geometry || !Array.isArray(geometry.lanes) || geometry.lanes.length === 0) {
@@ -407,7 +420,7 @@ export function FocusStreamFrames({
           const bw = Math.max(1, (x2 - x1) * sx)
           const bh = Math.max(1, (y2 - y1) * sy)
           procCtx.strokeRect(bx, by, bw, bh)
-          const tag = `${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
+          const tag = trackNumberToLabel(d.track_id)
           procCtx.fillText(tag, bx + 2, Math.max(12, by - 3))
         })
       }
