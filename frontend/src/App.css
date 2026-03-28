@@ -76,35 +76,21 @@ body {
 }
 
 .metricsSection,
-.signalSection,
 .alertsSection,
 .recommendedSection {
   margin: 0;
 }
 
-.signalSection {
-  padding: 1rem 1.25rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-
-.signalChips {
+.cameraCardNoThumb {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.signalChip {
-  display: inline-block;
-  padding: 0.35rem 0.75rem;
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--textSoft);
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  align-items: center;
+  justify-content: center;
+  min-height: 140px;
+  background: #0f172a;
+  color: #94a3b8;
+  font-size: 0.85rem;
+  padding: 0.75rem;
+  text-align: center;
 }
 
 .btn {

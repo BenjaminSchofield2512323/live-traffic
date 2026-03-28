@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import Hls from 'hls.js'
+import Hls, { XhrLoader } from 'hls.js'
 import { deriveMetrics, drawProcessedOverlay, imageDataToGray } from './focusFrameMetrics.js'
 
 const MW = 64
@@ -186,6 +186,29 @@ function absolutize511StreamUrl(u) {
   return `https://511ny.org${s.startsWith('/') ? s : `/${s}`}`
 }
 
+/** Same-origin proxy; browsers cannot set Referer on XHR (unsafe header). */
+function earthCamHlsProxyUrl(apiBase, targetUrl) {
+  if (!targetUrl) return ''
+  const base = apiBase.endsWith('/') ? apiBase.slice(0, -1) : apiBase
+  return `${base}/api/v1/stream/hls-proxy?u=${encodeURIComponent(targetUrl)}`
+}
+
+function createEarthCamProxyLoader(apiBase) {
+  return class EarthCamProxyLoader extends XhrLoader {
+    load(context, config, callbacks) {
+      const u = context.url
+      if (typeof u === 'string' && u.includes('/api/v1/stream/hls-proxy?')) {
+        return super.load(context, config, callbacks)
+      }
+      if (typeof u === 'string' && u.includes('earthcam.com')) {
+        const proxied = earthCamHlsProxyUrl(apiBase, u)
+        return super.load({ ...context, url: proxied }, config, callbacks)
+      }
+      return super.load(context, config, callbacks)
+    }
+  }
+}
+
 /**
  * Hidden HLS video decodes the stream; two canvases show raw vs processed (overlay)
  * at the requested FPS — no visible video player.
@@ -207,6 +230,8 @@ export function FocusStreamFrames({
   apiBase,
   onFrameMetrics,
   onDetectionMetrics,
+  /** Route EarthCam HLS through the Go API so Referer can be set server-side. */
+  earthCamHlsProxy = false,
 }) {
   const videoRef = useRef(null)
   const hlsRef = useRef(null)
@@ -338,10 +363,15 @@ export function FocusStreamFrames({
       video.load()
     }
 
+    const safariUrl =
+      earthCamHlsProxy && url.includes('earthcam.com') ? earthCamHlsProxyUrl(apiBase, url) : url
+
     if (Hls.isSupported()) {
+      const LoaderClass = earthCamHlsProxy ? createEarthCamProxyLoader(apiBase) : undefined
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
+        ...(LoaderClass ? { loader: LoaderClass } : {}),
       })
       hlsRef.current = hls
       hls.loadSource(url)
@@ -376,7 +406,7 @@ export function FocusStreamFrames({
     }
 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = url
+      video.src = safariUrl
       const onLoaded = () => setStreamReady(true)
       video.addEventListener('loadeddata', onLoaded)
       video.play().catch(() => {})
@@ -388,7 +418,7 @@ export function FocusStreamFrames({
 
     queueMicrotask(() => setHlsError('HLS not supported'))
     return undefined
-  }, [streamUrl])
+  }, [streamUrl, earthCamHlsProxy, apiBase])
 
   useEffect(() => {
     const video = videoRef.current

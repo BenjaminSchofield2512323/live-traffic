@@ -231,6 +231,8 @@ func main() {
 		})
 	}))
 
+	mux.HandleFunc("/api/v1/stream/hls-proxy", withCORS(handleEarthCamHLSProxy))
+
 	mux.HandleFunc("/api/v1/pipeline/focus/stream", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
@@ -290,10 +292,6 @@ func main() {
 		cameraID := intQuery(r, "camera_id", 0)
 		if cameraID <= 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
-			return
-		}
-		if !pipeline.HasCamera(cameraID) {
-			writeJSON(w, http.StatusNotFound, map[string]any{"error": "camera not active in current pipeline"})
 			return
 		}
 
@@ -619,6 +617,8 @@ type camera struct {
 	Region    string       `json:"region"`
 	County    string       `json:"county"`
 	City      string       `json:"city"`
+	Source    string       `json:"source,omitempty"`
+	PageURL   string       `json:"page_url,omitempty"`
 	Images    []cameraFeed `json:"images"`
 }
 

@@ -12,6 +12,8 @@ const apiBase =
 const focusRefreshIntervalMs = 2000
 const laneStorageKey = 'focus-lane-polygons-v1'
 const laneFlowWindowSec = 60
+/** Matches backend `external_sources` synthetic id for Herald Square EarthCam. */
+const EARTH_CAM_FOCUS_CAMERA_ID = 900001
 
 function trackNumberToLabel(trackID) {
   const n = Number(trackID)
@@ -80,7 +82,6 @@ function App() {
   const [stopping, setStopping] = useState(false)
   const [focusFPS, setFocusFPS] = useState(30)
   const [detectorFPS, setDetectorFPS] = useState(5)
-  const [includeEarthCam, setIncludeEarthCam] = useState(false)
   const [streamPage, setStreamPage] = useState(1)
   const streamsPerPage = 5
   /** Per-request detector query tuning (passed to /focus/detect → sidecar). */
@@ -215,7 +216,7 @@ function App() {
     setError('')
     try {
       const [camsResp, planResp, alertsResp, statusResp, viewsResp] = await Promise.all([
-        fetch(`${apiBase}/api/v1/cameras/recommended?count=10&include_earthcam=${includeEarthCam ? '1' : '0'}`),
+        fetch(`${apiBase}/api/v1/cameras/recommended?count=10&include_earthcam=1`),
         fetch(`${apiBase}/api/v1/analysis/plan`),
         fetch(`${apiBase}/api/v1/alerts?limit=100`),
         fetch(`${apiBase}/api/v1/pipeline/status`),
@@ -308,7 +309,7 @@ function App() {
 
   useEffect(() => {
     loadDashboard()
-  }, [includeEarthCam])
+  }, [])
 
   useEffect(() => {
     saveLaneGeometryToStorage(laneGeometryByCamera)
@@ -336,10 +337,63 @@ function App() {
     return () => clearInterval(id)
   }, [focusCameraID])
 
+  const focusViewOptions = useMemo(() => {
+    const list = []
+    const seen = new Set()
+    const push = (v) => {
+      if (seen.has(v.camera_id)) return
+      seen.add(v.camera_id)
+      list.push(v)
+    }
+    for (const v of cameraViews) {
+      push({ ...v, source: v.source || 'pipeline' })
+    }
+    for (const cam of recommended) {
+      if (cam.source === 'earthcam') continue
+      const feed = cam.images?.[0]
+      if (!feed?.videoUrl) continue
+      if (seen.has(cam.id)) continue
+      push({
+        camera_id: cam.id,
+        roadway: cam.roadway || `Camera ${cam.id}`,
+        location: cam.location || '',
+        stream_url: feed.videoUrl,
+        source: 'recommended',
+      })
+    }
+    if (recommended.length) {
+      const ec = recommended.find((c) => c.source === 'earthcam' && c.id === EARTH_CAM_FOCUS_CAMERA_ID)
+      const feed = ec?.images?.[0]
+      if (ec && feed?.videoUrl && !seen.has(ec.id)) {
+        push({
+          camera_id: ec.id,
+          roadway: ec.roadway || 'EarthCam',
+          location: ec.location || '',
+          stream_url: feed.videoUrl,
+          source: 'earthcam',
+          page_url: ec.page_url || '',
+        })
+      }
+    }
+    return list
+  }, [cameraViews, recommended])
+
   const focusedView = useMemo(
-    () => cameraViews.find((v) => v.camera_id === focusCameraID) || null,
-    [cameraViews, focusCameraID],
+    () => focusViewOptions.find((v) => v.camera_id === focusCameraID) || null,
+    [focusViewOptions, focusCameraID],
   )
+
+  useEffect(() => {
+    if (focusViewOptions.length === 0) {
+      if (focusCameraID != null) setFocusCameraID(null)
+      return
+    }
+    const stillValid =
+      focusCameraID != null && focusViewOptions.some((v) => v.camera_id === focusCameraID)
+    if (!stillValid) {
+      setFocusCameraID(focusViewOptions[0].camera_id)
+    }
+  }, [focusCameraID, focusViewOptions])
 
   const pagedStreamViews = useMemo(() => {
     if (!Array.isArray(cameraViews) || cameraViews.length === 0) return []
@@ -499,25 +553,12 @@ function App() {
         </div>
       </section>
 
-      <section className="signalSection" aria-labelledby="signals-heading">
-        <h2 id="signals-heading" className="sectionHeading">
-          Detection signals
-        </h2>
-        <div className="signalChips" role="list">
-          {(analysisPlan?.alerts || []).map((alertName) => (
-            <span key={alertName} className="signalChip" role="listitem">
-              {alertName.replace(/_/g, ' ')}
-            </span>
-          ))}
-        </div>
-      </section>
-
       <section className="focusPanel" aria-labelledby="focus-heading">
         <div className="focusPanelHeader">
           <h2 id="focus-heading">Focus stream</h2>
           <p className="focusPanelLead">Live HLS decode with YOLO overlay and lane geometry from the detector.</p>
         </div>
-        {cameraViews.length > 0 && (
+        {focusViewOptions.length > 0 && (
           <div className="focusControls">
             <label className="focusControl">
               Camera
@@ -525,9 +566,13 @@ function App() {
                 value={focusCameraID ?? ''}
                 onChange={(e) => setFocusCameraID(Number(e.target.value))}
               >
-                {cameraViews.map((v) => (
+                {focusViewOptions.map((v) => (
                   <option key={v.camera_id} value={v.camera_id}>
-                    {v.roadway || `Camera ${v.camera_id}`}
+                    {v.source === 'earthcam'
+                      ? `${v.roadway} (EarthCam)`
+                      : v.source === 'recommended'
+                        ? `${v.roadway} (511NY · recommended)`
+                        : v.roadway || `Camera ${v.camera_id}`}
                   </option>
                 ))}
               </select>
@@ -559,14 +604,6 @@ function App() {
               />
             </label>
             <label className="focusControl focusControlInline">
-              Include EarthCam
-              <input
-                type="checkbox"
-                checked={includeEarthCam}
-                onChange={(e) => setIncludeEarthCam(Boolean(e.target.checked))}
-              />
-            </label>
-            <label className="focusControl focusControlInline">
               Lane edit
               <button
                 type="button"
@@ -578,7 +615,7 @@ function App() {
             </label>
           </div>
         )}
-        {cameraViews.length > 0 && (
+        {focusViewOptions.length > 0 && (
           <div className="focusTuningRow" aria-label="Detector tuning">
             <span className="focusTuningHeading">Detector tuning</span>
             <label className="focusControl focusSlider">
@@ -672,8 +709,10 @@ function App() {
           </div>
         )}
         {detectStatus.lastError && <p className="warn">Detector: {detectStatus.lastError}</p>}
-        {cameraViews.length === 0 && (
-          <p className="focusPlaceholder">Start the pipeline to load focus cameras and streams.</p>
+        {focusViewOptions.length === 0 && (
+          <p className="focusPlaceholder">
+            Start the pipeline to load focus cameras, or wait for the recommended list below to load.
+          </p>
         )}
         {focusedView ? (
           <>
@@ -692,6 +731,7 @@ function App() {
                 detectTargetClasses={detectTargetClasses}
                 cameraID={focusCameraID}
                 apiBase={apiBase}
+                earthCamHlsProxy={focusedView.source === 'earthcam'}
                 localLaneGeometry={currentCameraGeometry}
                 laneEditMode={laneEditMode}
                 onLaneGeometryChange={handleLaneGeometryChange}
@@ -832,10 +872,16 @@ function App() {
                   </table>
                 </div>
               )}
-              {focusedView.stream_url && (
-                <a className="focusStreamLink" href={focusedView.stream_url} target="_blank" rel="noreferrer">
-                  Open stream in new tab
+              {focusedView.source === 'earthcam' && focusedView.page_url ? (
+                <a className="focusStreamLink" href={focusedView.page_url} target="_blank" rel="noreferrer">
+                  Watch on EarthCam (official page)
                 </a>
+              ) : (
+                focusedView.stream_url && (
+                  <a className="focusStreamLink" href={focusedView.stream_url} target="_blank" rel="noreferrer">
+                    Open stream in new tab
+                  </a>
+                )
               )}
             </div>
           </>
@@ -942,13 +988,21 @@ function App() {
         <div className="cameraGrid">
         {recommended.map((cam) => {
           const feed = cam.images?.[0]
+          const isEarthCam = cam.source === 'earthcam'
+          const watchUrl = isEarthCam && cam.page_url ? cam.page_url : feed?.videoUrl
           return (
             <article key={cam.id} className="cameraCard">
+              {feed?.imageUrl ? (
               <img
                 src={buildImageURL(feed?.imageUrl)}
                 alt={cam.location || cam.roadway || `Camera ${cam.id}`}
                 loading="lazy"
               />
+              ) : (
+                <div className="cameraCardNoThumb" aria-hidden>
+                  {isEarthCam ? 'No snapshot — use Watch on EarthCam' : 'No snapshot — open live stream'}
+                </div>
+              )}
               <div className="cameraBody">
                 <h3>{cam.roadway || `Camera ${cam.id}`}</h3>
                 <p>{cam.location}</p>
@@ -959,12 +1013,16 @@ function App() {
                   <strong>Score:</strong> {cam.score} ({cam.why})
                 </p>
                 <div className="links">
-                  <a href={feed?.videoUrl} target="_blank" rel="noreferrer">
-                    Open live stream
-                  </a>
-                  <a href={buildImageURL(feed?.imageUrl)} target="_blank" rel="noreferrer">
-                    Open snapshot
-                  </a>
+                  {watchUrl && (
+                    <a href={watchUrl} target="_blank" rel="noreferrer">
+                      {isEarthCam ? 'Watch on EarthCam' : 'Open live stream'}
+                    </a>
+                  )}
+                  {feed?.imageUrl && (
+                    <a href={buildImageURL(feed.imageUrl)} target="_blank" rel="noreferrer">
+                      Open snapshot
+                    </a>
+                  )}
                 </div>
               </div>
             </article>

@@ -55,6 +55,8 @@ func (r earthCamPageResult) asScored() []scoredCamera {
 				Region:    ext.Region,
 				City:      ext.City,
 				County:    "",
+				Source:    ext.Source,
+				PageURL:   ext.PageURL,
 				Images:    ext.Images,
 			},
 		}
@@ -76,6 +78,8 @@ func (c externalSourceCamera) asScoredCamera() scoredCamera {
 			Region:    c.Region,
 			City:      c.City,
 			County:    "",
+			Source:    c.Source,
+			PageURL:   c.PageURL,
 			Images:    c.Images,
 		},
 	}
@@ -153,24 +157,29 @@ func (c *earthCamClient) heraldSquare(ctx context.Context) (externalSourceCamera
 	}, nil
 }
 
-var earthCamHLSPattern = regexp.MustCompile(`https?:\\?/\\?/[^"'\\]+?\.m3u8(?:\\?[^"'\\]*)?`)
+// After JSON-style \/ → / normalization, match HLS playlist URLs in the page.
+var earthCamHLSPlainPattern = regexp.MustCompile(`https?://[^\s"'<>]+\.m3u8[^\s"'<>]*`)
 
 func extractEarthCamHLSURL(html string) string {
 	if strings.TrimSpace(html) == "" {
 		return ""
 	}
-	match := earthCamHLSPattern.FindString(html)
-	if match == "" {
+	// EarthCam embeds URLs in JSON with escaped slashes: https:\/\/host\/path\/x.m3u8
+	// A regex that forbids backslashes in the path stops at the first \/.
+	flat := strings.ReplaceAll(html, `\/`, `/`)
+	flat = strings.ReplaceAll(flat, `\u0026`, "&")
+	matches := earthCamHLSPlainPattern.FindAllString(flat, -1)
+	if len(matches) == 0 {
 		return ""
 	}
-	unescaped := strings.ReplaceAll(match, `\/`, `/`)
-	unescaped = strings.ReplaceAll(unescaped, `\u0026`, "&")
-	unescaped = strings.ReplaceAll(unescaped, `\\`, `\`)
-	if strings.HasPrefix(unescaped, "https:\\/\\/") {
-		unescaped = strings.ReplaceAll(unescaped, `\/`, `/`)
+	// Prefer live fecnetwork HLS over archive / backup playlists when both appear.
+	for _, m := range matches {
+		u := strings.TrimSpace(m)
+		if strings.Contains(u, "fecnetwork") && strings.Contains(u, ".m3u8") {
+			return u
+		}
 	}
-	unescaped = strings.ReplaceAll(unescaped, `\`, "")
-	return strings.TrimSpace(unescaped)
+	return strings.TrimSpace(matches[0])
 }
 
 func normalizeEarthCamURL(raw string) string {
@@ -182,11 +191,7 @@ func normalizeEarthCamURL(raw string) string {
 	if err != nil {
 		return raw
 	}
-	// Remove short-lived token query params to keep URLs stable between refreshes.
-	q := u.Query()
-	q.Del("t")
-	q.Del("td")
-	u.RawQuery = q.Encode()
+	// Keep query params (e.g. t, td); EarthCam HLS often requires tokenized URLs.
 	return u.String()
 }
 
