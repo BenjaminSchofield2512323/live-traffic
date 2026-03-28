@@ -154,6 +154,7 @@ export function FocusStreamFrames({
   const detectInflightRef = useRef(false)
   const lastDetectAtRef = useRef(0)
   const latestDetectionRef = useRef(null)
+  const analysisFrameRef = useRef(null)
   const latestFrameSizeRef = useRef({ width: 0, height: 0 })
   const draftPolyRef = useRef([])
   const [laneEditError, setLaneEditError] = useState('')
@@ -175,6 +176,7 @@ export function FocusStreamFrames({
 
   useEffect(() => {
     latestDetectionRef.current = null
+    analysisFrameRef.current = null
     detectInflightRef.current = false
     lastDetectAtRef.current = 0
     detectionCbRef.current?.(null)
@@ -342,7 +344,12 @@ export function FocusStreamFrames({
       const procCtx = proc.getContext('2d')
 
       rawCtx.drawImage(video, 0, 0, dw, dh)
-      procCtx.drawImage(video, 0, 0, dw, dh)
+      const frozen = analysisFrameRef.current
+      if (frozen && frozen.width > 0 && frozen.height > 0) {
+        procCtx.drawImage(frozen, 0, 0, dw, dh)
+      } else {
+        procCtx.drawImage(video, 0, 0, dw, dh)
+      }
 
       ctxM.drawImage(video, 0, 0, MW, MH)
       const imgData = ctxM.getImageData(0, 0, MW, MH)
@@ -440,7 +447,17 @@ export function FocusStreamFrames({
       if (shouldDetect) {
         detectInflightRef.current = true
         lastDetectAtRef.current = now
-        raw.toBlob(async (blob) => {
+        const analysisCanvas = document.createElement('canvas')
+        analysisCanvas.width = dw
+        analysisCanvas.height = dh
+        const analysisCtx = analysisCanvas.getContext('2d')
+        if (!analysisCtx) {
+          detectInflightRef.current = false
+          rafRef.current = requestAnimationFrame(tick)
+          return
+        }
+        analysisCtx.drawImage(video, 0, 0, dw, dh)
+        analysisCanvas.toBlob(async (blob) => {
           if (!blob) {
             detectInflightRef.current = false
             return
@@ -466,6 +483,7 @@ export function FocusStreamFrames({
               throw new Error(`detect failed (${resp.status})`)
             }
             const payload = await resp.json()
+            analysisFrameRef.current = analysisCanvas
             latestDetectionRef.current = payload
             detectionCbRef.current?.(payload)
           } catch {
