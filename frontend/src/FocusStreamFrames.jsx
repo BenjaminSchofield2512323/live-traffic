@@ -354,6 +354,8 @@ export function FocusStreamFrames({
       drawProcessedOverlay(procCtx, dw, dh, motion, occupancy)
       const rawPayload = latestDetectionRef.current
       const { image: detImage, detections: detList } = normalizeDetectorPayload(rawPayload)
+      const trackList = Array.isArray(rawPayload?.tracks) ? rawPayload.tracks : []
+      const hasLocalLanes = Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0
       drawLanePolygons(procCtx, rawPayload, dw, dh)
       if (laneEditMode) {
         const localLanes = normalizedLocalGeometry?.lanes || []
@@ -402,7 +404,8 @@ export function FocusStreamFrames({
         }
         procCtx.restore()
       }
-      if (Array.isArray(detList) && detList.length > 0) {
+      const overlayItems = trackList.length > 0 ? trackList : detList
+      if (Array.isArray(overlayItems) && overlayItems.length > 0) {
         const detW = Number(detImage?.width || 0) || dw
         const detH = Number(detImage?.height || 0) || dh
         const sx = detW > 0 ? dw / detW : 1
@@ -412,8 +415,12 @@ export function FocusStreamFrames({
         procCtx.strokeStyle = 'rgba(45,210,80,0.95)'
         procCtx.font = '12px sans-serif'
         procCtx.fillStyle = 'rgba(45,210,80,0.95)'
-        detList.forEach((d) => {
+        overlayItems.forEach((d) => {
           if (!Array.isArray(d.bbox) || d.bbox.length < 4) return
+          const laneID = d.lane_id
+          const inROI = Boolean(d.in_roi ?? (laneID != null && laneID !== ''))
+          // When user-authored lanes exist, only draw lane-assigned vehicles.
+          if (hasLocalLanes && !inROI) return
           const [x1, y1, x2, y2] = d.bbox
           const bx = x1 * sx
           const by = y1 * sy
