@@ -740,6 +740,10 @@ body {
   font-size: 0.9rem;
 }
 
+.focusControlInline button {
+  margin-top: 0.15rem;
+}
+
 .focusHint {
   margin: 0 0 0.65rem;
   font-size: 0.82rem;
@@ -849,4 +853,44 @@ body {
   margin: 0 0 0.65rem;
   color: #334155;
   font-size: 0.9rem;
+}
+
+.focusLaneEditorActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+  margin-bottom: 0.35rem;
+}
+
+.laneEditorPanel {
+  margin: 0.4rem 0 0.65rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radiusSm);
+  background: var(--surface2);
+}
+
+.laneEditorButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.laneEditorButtons button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.35rem 0.6rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.laneEditorHint {
+  margin: 0.5rem 0 0;
+  color: var(--textMuted);
+  font-size: 0.82rem;
 }
