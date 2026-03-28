@@ -13,6 +13,19 @@ const focusRefreshIntervalMs = 2000
 const laneStorageKey = 'focus-lane-polygons-v1'
 const laneFlowWindowSec = 60
 
+function trackNumberToLabel(trackID) {
+  const n = Number(trackID)
+  if (!Number.isFinite(n) || n < 1) return String(trackID ?? '?')
+  let x = Math.floor(n)
+  let label = ''
+  while (x > 0) {
+    const rem = (x - 1) % 26
+    label = String.fromCharCode(65 + rem) + label
+    x = Math.floor((x - 1) / 26)
+  }
+  return label || String(trackID)
+}
+
 function loadLaneGeometryFromStorage() {
   try {
     if (typeof window === 'undefined') return {}
@@ -77,7 +90,6 @@ function App() {
   const [laneFlowStats, setLaneFlowStats] = useState({ totalPerMin: 0, perLane: {} })
   const [trackedEntities, setTrackedEntities] = useState([])
   const flowStateRef = useRef({})
-  const overlayIDMapRef = useRef({})
 
   /** Focus canvas POSTs to /focus/detect; sync metrics cards + lane counts from the same payload the overlay uses. */
   const onDetectionMetrics = useCallback((payload) => {
@@ -138,32 +150,16 @@ function App() {
       : 0
     setLaneFlowStats({ totalPerMin, perLane })
 
-    const nextIDMap = { ...overlayIDMapRef.current }
-    let alphaIndex = Object.keys(nextIDMap).length
-    const toAlpha = (idx) => {
-      let n = idx
-      let out = ''
-      do {
-        out = String.fromCharCode(65 + (n % 26)) + out
-        n = Math.floor(n / 26) - 1
-      } while (n >= 0)
-      return out
-    }
     const entities = tracks
       .filter((t) => t?.track_id != null)
       .map((t) => {
-        const trackKey = String(t.track_id)
-        if (!nextIDMap[trackKey]) {
-          nextIDMap[trackKey] = toAlpha(alphaIndex)
-          alphaIndex += 1
-        }
         const detMatch = detections.find((d) => Number(d.track_id) === Number(t.track_id))
         const cls = String(detMatch?.class_name || t.class_name || 'unknown')
         const confidence = Number(detMatch?.confidence ?? t.confidence ?? 0)
         const speedPxS = Number(t.speed_px_s ?? 0)
         return {
           track_id: Number(t.track_id),
-          overlay_id: nextIDMap[trackKey],
+          overlay_id: trackNumberToLabel(t.track_id),
           class_name: cls,
           lane_id: t.lane_id ?? null,
           speed_px_s: speedPxS,
@@ -172,7 +168,6 @@ function App() {
         }
       })
       .sort((a, b) => a.overlay_id.localeCompare(b.overlay_id))
-    overlayIDMapRef.current = nextIDMap
     setTrackedEntities(entities)
 
     setDetectStatus((prev) => ({
@@ -360,7 +355,6 @@ function App() {
     setDetectorMetrics(null)
     setLaneFlowStats({ totalPerMin: 0, perLane: {} })
     setTrackedEntities([])
-    overlayIDMapRef.current = {}
     setLaneEditMode(false)
   }, [focusCameraID, focusedView?.stream_url])
 
@@ -703,6 +697,35 @@ function App() {
                     .map(([laneID, count]) => `${laneID}:${count}/min`)
                     .join(' | ')}
                 </p>
+              )}
+              {trackedEntities.length > 0 && (
+                <div className="focusEntityTableWrap">
+                  <h4>Tracked entities</h4>
+                  <table className="focusEntityTable">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Type</th>
+                        <th>Lane</th>
+                        <th>Moving</th>
+                        <th>Speed</th>
+                        <th>Conf.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trackedEntities.map((ent) => (
+                        <tr key={`${ent.overlay_id}-${ent.track_id}`}>
+                          <td>{ent.overlay_id}</td>
+                          <td>{ent.class_name}</td>
+                          <td>{ent.lane_id ?? '-'}</td>
+                          <td>{ent.is_moving ? 'yes' : 'no'}</td>
+                          <td>{Number(ent.speed_px_s ?? 0).toFixed(1)}</td>
+                          <td>{Number(ent.confidence ?? 0).toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
               {focusedView.stream_url && (
                 <a className="focusStreamLink" href={focusedView.stream_url} target="_blank" rel="noreferrer">

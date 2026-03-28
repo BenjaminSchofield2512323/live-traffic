@@ -895,7 +895,7 @@ body {
   font-size: 0.82rem;
 }
 
-.entityTableWrap {
+.focusEntityTableWrap {
   margin-top: 0.8rem;
   border: 1px solid var(--border);
   border-radius: var(--radiusSm);
@@ -903,13 +903,23 @@ body {
   background: var(--surface);
 }
 
-.entityTable {
+.focusEntityTableWrap h4 {
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--textSoft);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+
+.focusEntityTable {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.84rem;
 }
 
-.entityTable thead th {
+.focusEntityTable thead th {
   text-align: left;
   font-weight: 700;
   color: var(--textSoft);
@@ -918,12 +928,12 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-.entityTable tbody td {
+.focusEntityTable tbody td {
   padding: 0.4rem 0.55rem;
   border-bottom: 1px solid var(--border);
   color: var(--text);
 }
 
-.entityTable tbody tr:last-child td {
+.focusEntityTable tbody tr:last-child td {
   border-bottom: none;
 }
