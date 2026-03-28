@@ -80,6 +80,12 @@ function App() {
   const [stopping, setStopping] = useState(false)
   const [focusFPS, setFocusFPS] = useState(30)
   const [detectorFPS, setDetectorFPS] = useState(5)
+  /** Per-request detector query tuning (passed to /focus/detect → sidecar). */
+  const [detectConf, setDetectConf] = useState(0.25)
+  const [detectIou, setDetectIou] = useState(0.45)
+  const [detectImgsz, setDetectImgsz] = useState(640)
+  const [trackAssocIou, setTrackAssocIou] = useState(0.25)
+  const [trackAssocCenterPx, setTrackAssocCenterPx] = useState(96)
   /** Detector-side metrics from YOLO sidecar via backend focus proxy. */
   const [detectorMetrics, setDetectorMetrics] = useState(null)
   /** Per-camera geometry authored in the focus view and cached in browser storage. */
@@ -545,6 +551,89 @@ function App() {
             </label>
           </div>
         )}
+        {cameraViews.length > 0 && (
+          <div className="focusTuningRow" aria-label="Detector tuning">
+            <span className="focusTuningHeading">Detector tuning</span>
+            <label className="focusControl focusSlider">
+              <span className="focusSliderLabel">
+                Conf <output>{detectConf.toFixed(2)}</output>
+              </span>
+              <input
+                type="range"
+                min={0.05}
+                max={0.55}
+                step={0.01}
+                value={detectConf}
+                onChange={(e) => setDetectConf(Number(e.target.value))}
+              />
+            </label>
+            <label className="focusControl focusSlider">
+              <span className="focusSliderLabel">
+                NMS IoU <output>{detectIou.toFixed(2)}</output>
+              </span>
+              <input
+                type="range"
+                min={0.2}
+                max={0.7}
+                step={0.01}
+                value={detectIou}
+                onChange={(e) => setDetectIou(Number(e.target.value))}
+              />
+            </label>
+            <label className="focusControl focusSlider">
+              <span className="focusSliderLabel">
+                imgsz <output>{detectImgsz}</output>
+              </span>
+              <input
+                type="range"
+                min={480}
+                max={1280}
+                step={32}
+                value={detectImgsz}
+                onChange={(e) => setDetectImgsz(Number(e.target.value))}
+              />
+            </label>
+            <label className="focusControl focusSlider">
+              <span className="focusSliderLabel">
+                Track IoU <output>{trackAssocIou.toFixed(2)}</output>
+              </span>
+              <input
+                type="range"
+                min={0.05}
+                max={0.55}
+                step={0.01}
+                value={trackAssocIou}
+                onChange={(e) => setTrackAssocIou(Number(e.target.value))}
+              />
+            </label>
+            <label className="focusControl focusSlider">
+              <span className="focusSliderLabel">
+                Center px <output>{trackAssocCenterPx}</output>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={200}
+                step={1}
+                value={trackAssocCenterPx}
+                onChange={(e) => setTrackAssocCenterPx(Number(e.target.value))}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn btnSecondary focusTuningReset"
+              onClick={() => {
+                setDetectConf(0.25)
+                setDetectIou(0.45)
+                setDetectImgsz(640)
+                setTrackAssocIou(0.25)
+                setTrackAssocCenterPx(96)
+              }}
+            >
+              Reset tuning
+            </button>
+          </div>
+        )}
         {detectStatus.lastError && <p className="warn">Detector: {detectStatus.lastError}</p>}
         {cameraViews.length === 0 && (
           <p className="focusPlaceholder">Start the pipeline to load focus cameras and streams.</p>
@@ -558,6 +647,11 @@ function App() {
                 streamUrl={focusedView.stream_url}
                 fps={focusFPS}
                 detectorFPS={detectorFPS}
+                detectConf={detectConf}
+                detectIou={detectIou}
+                detectImgsz={detectImgsz}
+                trackAssocIou={trackAssocIou}
+                trackAssocCenterPx={trackAssocCenterPx}
                 cameraID={focusCameraID}
                 apiBase={apiBase}
                 localLaneGeometry={currentCameraGeometry}
@@ -623,6 +717,14 @@ function App() {
                 <div className="focusMetricPill">
                   <span className="focusMetricLabel">YOLO FPS cap</span>
                   <span className="focusMetricValue">{detectorFPS}</span>
+                </div>
+                <div className="focusMetricPill">
+                  <span className="focusMetricLabel">Applied conf / imgsz</span>
+                  <span className="focusMetricValue">
+                    {detectorMetrics?.detector_tuning
+                      ? `${Number(detectorMetrics.detector_tuning.conf).toFixed(2)} / ${detectorMetrics.detector_tuning.imgsz}`
+                      : '—'}
+                  </span>
                 </div>
                 <div className="focusMetricPill">
                   <span className="focusMetricLabel">Queue / stopped</span>

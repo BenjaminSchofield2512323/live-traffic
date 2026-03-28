@@ -133,6 +133,11 @@ export function FocusStreamFrames({
   streamUrl,
   fps,
   detectorFPS = 2,
+  detectConf = 0.25,
+  detectIou = 0.45,
+  detectImgsz = 640,
+  trackAssocIou = 0.25,
+  trackAssocCenterPx = 96,
   localLaneGeometry = null,
   laneEditMode = false,
   onLaneGeometryChange,
@@ -155,6 +160,13 @@ export function FocusStreamFrames({
   const lastDetectAtRef = useRef(0)
   const latestDetectionRef = useRef(null)
   const analysisFrameRef = useRef(null)
+  const detectTuningRef = useRef({
+    conf: detectConf,
+    iou: detectIou,
+    imgsz: detectImgsz,
+    trackAssocIou,
+    trackAssocCenterPx,
+  })
   const latestFrameSizeRef = useRef({ width: 0, height: 0 })
   const draftPolyRef = useRef([])
   const [laneEditError, setLaneEditError] = useState('')
@@ -173,6 +185,16 @@ export function FocusStreamFrames({
   useEffect(() => {
     detectionCbRef.current = onDetectionMetrics
   }, [onDetectionMetrics])
+
+  useEffect(() => {
+    detectTuningRef.current = {
+      conf: detectConf,
+      iou: detectIou,
+      imgsz: detectImgsz,
+      trackAssocIou,
+      trackAssocCenterPx,
+    }
+  }, [detectConf, detectIou, detectImgsz, trackAssocIou, trackAssocCenterPx])
 
   useEffect(() => {
     latestDetectionRef.current = null
@@ -464,11 +486,17 @@ export function FocusStreamFrames({
           }
           try {
             const bytes = await blob.arrayBuffer()
+            const tun = detectTuningRef.current
+            const imgsz = Math.round(Math.max(160, Math.min(1280, Number(tun.imgsz) || 640)) / 32) * 32
             const params = new URLSearchParams({
               camera_id: String(cameraID),
               stream_id: `cam-${cameraID}`,
-              imgsz: '640',
-              conf: '0.25',
+              imgsz: String(imgsz),
+              conf: String(tun.conf),
+              iou: String(tun.iou),
+              track_assoc_iou_threshold: String(tun.trackAssocIou),
+              track_assoc_center_max_px: String(tun.trackAssocCenterPx),
+              enhanced_preview: '1',
             })
             if (Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0) {
               params.set('lanes', JSON.stringify(normalizedLocalGeometry.lanes))
@@ -484,6 +512,21 @@ export function FocusStreamFrames({
             }
             const payload = await resp.json()
             analysisFrameRef.current = analysisCanvas
+            const previewB64 = typeof payload?.enhanced_preview_jpeg_b64 === 'string' ? payload.enhanced_preview_jpeg_b64 : ''
+            if (previewB64.length > 0) {
+              const img = new Image()
+              img.onload = () => {
+                const c = document.createElement('canvas')
+                c.width = analysisCanvas.width
+                c.height = analysisCanvas.height
+                const ictx = c.getContext('2d')
+                if (ictx) {
+                  ictx.drawImage(img, 0, 0, c.width, c.height)
+                  analysisFrameRef.current = c
+                }
+              }
+              img.src = `data:image/jpeg;base64,${previewB64}`
+            }
             latestDetectionRef.current = payload
             detectionCbRef.current?.(payload)
           } catch {

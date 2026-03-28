@@ -709,6 +709,57 @@ body {
   margin-top: 0.15rem;
 }
 
+.focusTuningRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.65rem 0.85rem;
+  margin-bottom: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radiusSm);
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.focusTuningHeading {
+  flex: 1 0 100%;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--textSoft);
+  margin: 0;
+}
+
+.focusSlider {
+  min-width: 9rem;
+}
+
+.focusSliderLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+
+.focusSliderLabel output {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.focusSlider input[type='range'] {
+  width: 100%;
+  min-width: 6rem;
+  margin-top: 0.2rem;
+}
+
+.focusTuningReset {
+  align-self: center;
+  margin-top: 0.35rem;
+}
+
 .focusHint {
   margin: 0 0 0.65rem;
   font-size: 0.82rem;
