@@ -300,6 +300,25 @@ body {
   border: 1px solid var(--border);
 }
 
+.focusCompareRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.focusDualRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.focusDualRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
@@ -709,6 +728,57 @@ body {
   margin-top: 0.15rem;
 }
 
+.focusTuningRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.65rem 0.85rem;
+  margin-bottom: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radiusSm);
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.focusTuningHeading {
+  flex: 1 0 100%;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--textSoft);
+  margin: 0;
+}
+
+.focusSlider {
+  min-width: 9rem;
+}
+
+.focusSliderLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+
+.focusSliderLabel output {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.focusSlider input[type='range'] {
+  width: 100%;
+  min-width: 6rem;
+  margin-top: 0.2rem;
+}
+
+.focusTuningReset {
+  align-self: center;
+  margin-top: 0.35rem;
+}
+
 .focusHint {
   margin: 0 0 0.65rem;
   font-size: 0.82rem;
@@ -765,11 +835,18 @@ body {
 
 .focusStreamFrames {
   position: relative;
+  /* Ultra-wide camera frames were stretching edge-to-edge; cap width and center. */
+  max-width: min(100%, 960px);
+  margin-inline: auto;
 }
 
 .focusFrameCanvas {
   width: 100%;
-  max-height: 320px;
+  max-width: 100%;
+  max-height: min(38vh, 320px);
+  height: auto;
+  object-fit: contain;
+  object-position: center;
   background: #0f172a;
   border-radius: 8px;
   display: block;

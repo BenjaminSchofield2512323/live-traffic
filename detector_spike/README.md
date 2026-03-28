@@ -99,6 +99,10 @@ Important:
 - `DETECTOR_QUEUE_SPEED_THRESHOLD_PX_S` (default `8.0`)
 - `DETECTOR_QUEUE_OCCUPANCY_THRESHOLD` (default `0.18`)
 - `DETECTOR_QUEUE_MIN_TRACKS` (default `4`)
+- `DETECTOR_TRACK_ASSOC_HUNGARIAN` (default `false`; enables global one-to-one Hungarian assignment for fallback association)
+- `DETECTOR_TRACK_ASSOC_HUNGARIAN_ENABLED` (alias; same behavior as above for backward compatibility)
+- `DETECTOR_TRACK_ASSOC_IOU_THRESHOLD` (default `0.25`; minimum IoU to accept direct overlap match)
+- `DETECTOR_TRACK_ASSOC_CENTER_MAX_PX` (default `96.0`; optional center-distance fallback gate in pixels, set `0` to disable)
 - `DETECTOR_ROI_CONFIG_PATH` (optional path to versioned lane geometry JSON)
 - `DETECTOR_DEBUG_OVERLAY_DEFAULT` (`false` by default)
 

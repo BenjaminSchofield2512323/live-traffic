@@ -9,12 +9,17 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from ultralytics import YOLO
+
+try:
+    from lap import lapjv
+except Exception:  # pragma: no cover - optional runtime fallback.
+    lapjv = None
 
 TARGET_CLASSES = {"car", "truck", "bus", "motorcycle"}
 LOGGER = logging.getLogger("detector_spike")
@@ -158,6 +163,7 @@ class TrackMemory:
     first_seen_ts: float = 0.0
     last_seen_ts: float = 0.0
     last_bbox: tuple[float, float, float, float] | None = None
+    smoothed_bbox: tuple[float, float, float, float] | None = None
     # ts, cx, cy, projection_along_direction
     samples: deque[tuple[float, float, float, float]] = field(default_factory=deque)
     low_speed_since_ts: float | None = None
@@ -177,11 +183,23 @@ class StreamRuntime:
 
 
 class MOTStateStore:
-    def __init__(self, track_max_age_sec: float, smooth_window_sec: float, min_hits: int, assoc_iou_threshold: float) -> None:
+    def __init__(
+        self,
+        track_max_age_sec: float,
+        smooth_window_sec: float,
+        min_hits: int,
+        assoc_iou_threshold: float,
+        bbox_ema_alpha: float,
+        assoc_center_max_px: float = 0.0,
+        assoc_hungarian_enabled: bool = False,
+    ) -> None:
         self.track_max_age_sec = track_max_age_sec
         self.smooth_window_sec = smooth_window_sec
         self.min_hits = max(1, min_hits)
         self.assoc_iou_threshold = max(0.0, min(0.95, assoc_iou_threshold))
+        self.bbox_ema_alpha = max(0.0, min(1.0, bbox_ema_alpha))
+        self.assoc_center_max_px = max(0.0, assoc_center_max_px)
+        self.assoc_hungarian_enabled = bool(assoc_hungarian_enabled)
         self._lock = threading.Lock()
         self._streams: dict[str, StreamRuntime] = {}
 
@@ -191,6 +209,9 @@ class MOTStateStore:
         detections: list[dict[str, Any]],
         direction: tuple[float, float],
         now_ts: float,
+        assoc_iou_threshold: Optional[float] = None,
+        assoc_center_max_px: Optional[float] = None,
+        assoc_hungarian_enabled: Optional[bool] = None,
     ) -> list[dict[str, Any]]:
         with self._lock:
             runtime = self._streams.setdefault(stream_id, StreamRuntime())
@@ -199,19 +220,66 @@ class MOTStateStore:
 
             out: list[dict[str, Any]] = []
             seen_local_ids: set[int] = set()
+            local_ids_by_det: list[int | None] = [None] * len(detections)
+            unresolved_det_indices: list[int] = []
+            iou_thr = self.assoc_iou_threshold if assoc_iou_threshold is None else max(
+                0.0, min(0.95, float(assoc_iou_threshold))
+            )
+            center_max = self.assoc_center_max_px if assoc_center_max_px is None else max(0.0, float(assoc_center_max_px))
+            use_hungarian = self.assoc_hungarian_enabled if assoc_hungarian_enabled is None else bool(assoc_hungarian_enabled)
 
-            for det in detections:
+            # Keep raw->local mapping path first; unresolved detections are associated as a batch.
+            for det_idx, det in enumerate(detections):
                 raw_track_id = det.get("_raw_track_id")
                 local_track_id = None
                 if isinstance(raw_track_id, int):
-                    local_track_id = runtime.raw_to_local.get(raw_track_id)
+                    candidate = runtime.raw_to_local.get(raw_track_id)
+                    if candidate is not None:
+                        mem = runtime.tracks.get(candidate)
+                        if mem is not None and candidate not in seen_local_ids and (now_ts - mem.last_seen_ts <= self.track_max_age_sec):
+                            local_track_id = candidate
                 if local_track_id is None:
-                    local_track_id = self._associate_by_iou(
-                        runtime=runtime,
-                        bbox=det["bbox"],
-                        seen_local_ids=seen_local_ids,
-                        now_ts=now_ts,
-                    )
+                    unresolved_det_indices.append(det_idx)
+                    continue
+                local_ids_by_det[det_idx] = local_track_id
+                seen_local_ids.add(local_track_id)
+
+            # Global one-to-one assignment avoids list-order swaps for nearby vehicles.
+            if use_hungarian and unresolved_det_indices:
+                det_batch = [detections[i] for i in unresolved_det_indices]
+                assignments = self._associate_hungarian_batch(
+                    runtime=runtime,
+                    detections=det_batch,
+                    seen_local_ids=seen_local_ids,
+                    now_ts=now_ts,
+                    assoc_iou_threshold=iou_thr,
+                    assoc_center_max_px=center_max,
+                )
+                for rel_det_idx, local_track_id in assignments.items():
+                    abs_det_idx = unresolved_det_indices[rel_det_idx]
+                    local_ids_by_det[abs_det_idx] = local_track_id
+                    seen_local_ids.add(local_track_id)
+
+            # Greedy fallback for unmatched detections (or when Hungarian is disabled/unavailable).
+            for det_idx in unresolved_det_indices:
+                if local_ids_by_det[det_idx] is not None:
+                    continue
+                det = detections[det_idx]
+                local_track_id = self._associate_by_iou(
+                    runtime=runtime,
+                    bbox=det["bbox"],
+                    seen_local_ids=seen_local_ids,
+                    now_ts=now_ts,
+                    assoc_iou_threshold=iou_thr,
+                    assoc_center_max_px=center_max,
+                )
+                if local_track_id is not None:
+                    local_ids_by_det[det_idx] = local_track_id
+                    seen_local_ids.add(local_track_id)
+
+            for det_idx, det in enumerate(detections):
+                raw_track_id = det.get("_raw_track_id")
+                local_track_id = local_ids_by_det[det_idx]
                 if local_track_id is None:
                     local_track_id = runtime.alloc_track_id()
                 if isinstance(raw_track_id, int):
@@ -233,10 +301,18 @@ class MOTStateStore:
 
                 x1, y1, x2, y2 = det["bbox"]
                 mem.last_bbox = (float(x1), float(y1), float(x2), float(y2))
-                cx = float((x1 + x2) / 2.0)
-                cy = float((y1 + y2) / 2.0)
+                if mem.smoothed_bbox is None:
+                    mem.smoothed_bbox = mem.last_bbox
+                else:
+                    mem.smoothed_bbox = self._smooth_bbox(
+                        prev=mem.smoothed_bbox,
+                        current=mem.last_bbox,
+                    )
+                sx1, sy1, sx2, sy2 = mem.smoothed_bbox
+                cx = float((sx1 + sx2) / 2.0)
+                cy = float((sy1 + sy2) / 2.0)
                 bcx = cx
-                bcy = float(y2)
+                bcy = float(sy2)
                 projection = bcx * direction[0] + bcy * direction[1]
                 mem.samples.append((now_ts, bcx, bcy, projection))
                 self._trim_samples(mem, now_ts)
@@ -249,11 +325,11 @@ class MOTStateStore:
                 else:
                     mem.low_speed_since_ts = None
 
-                seen_local_ids.add(local_track_id)
                 out.append(
                     {
                         "track_id": local_track_id,
-                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                        "bbox": [float(sx1), float(sy1), float(sx2), float(sy2)],
+                        "bbox_raw": [float(x1), float(y1), float(x2), float(y2)],
                         "class_name": det["class_name"],
                         "class_id": int(det["class_id"]),
                         "confidence": float(det["confidence"]),
@@ -301,29 +377,171 @@ class MOTStateStore:
         dt = max(1e-3, t1 - t0)
         return (p1 - p0) / dt
 
+    def _smooth_bbox(
+        self,
+        prev: tuple[float, float, float, float],
+        current: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float]:
+        a = self.bbox_ema_alpha
+        if a <= 0.0:
+            return current
+        if a >= 1.0:
+            return prev
+        px1, py1, px2, py2 = prev
+        cx1, cy1, cx2, cy2 = current
+        return (
+            (1.0 - a) * cx1 + a * px1,
+            (1.0 - a) * cy1 + a * py1,
+            (1.0 - a) * cx2 + a * px2,
+            (1.0 - a) * cy2 + a * py2,
+        )
+
+    @staticmethod
+    def _mem_bbox_for_assoc(mem: TrackMemory) -> Optional[tuple[float, float, float, float]]:
+        if mem.smoothed_bbox is not None:
+            return mem.smoothed_bbox
+        return mem.last_bbox
+
+    @staticmethod
+    def _center_distance_px(
+        a: tuple[float, float, float, float],
+        b: list[float],
+    ) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = [float(v) for v in b]
+        acx = (ax1 + ax2) * 0.5
+        acy = (ay1 + ay2) * 0.5
+        bcx = (bx1 + bx2) * 0.5
+        bcy = (by1 + by2) * 0.5
+        dx = acx - bcx
+        dy = acy - bcy
+        return float((dx * dx + dy * dy) ** 0.5)
+
     def _associate_by_iou(
         self,
         runtime: StreamRuntime,
         bbox: list[float],
         seen_local_ids: set[int],
         now_ts: float,
-    ) -> int | None:
+        assoc_iou_threshold: Optional[float] = None,
+        assoc_center_max_px: Optional[float] = None,
+    ) -> Optional[int]:
+        iou_thr = self.assoc_iou_threshold if assoc_iou_threshold is None else max(0.0, min(0.95, float(assoc_iou_threshold)))
+        center_max = (
+            self.assoc_center_max_px if assoc_center_max_px is None else max(0.0, float(assoc_center_max_px))
+        )
         best_local_id: int | None = None
         best_iou = 0.0
+        best_center_id: int | None = None
+        best_center_dist = float("inf")
         for local_id, mem in runtime.tracks.items():
             if local_id in seen_local_ids:
                 continue
             if now_ts - mem.last_seen_ts > self.track_max_age_sec:
                 continue
-            if mem.last_bbox is None:
+            prior = self._mem_bbox_for_assoc(mem)
+            if prior is None:
                 continue
-            iou = self._bbox_iou(mem.last_bbox, bbox)
+            iou = self._bbox_iou(prior, bbox)
             if iou > best_iou:
                 best_iou = iou
                 best_local_id = local_id
-        if best_local_id is not None and best_iou >= self.assoc_iou_threshold:
+            if center_max > 0:
+                dist = self._center_distance_px(prior, bbox)
+                if dist <= center_max and dist < best_center_dist:
+                    best_center_dist = dist
+                    best_center_id = local_id
+        if best_local_id is not None and best_iou >= iou_thr:
             return best_local_id
+        if best_center_id is not None:
+            return best_center_id
         return None
+
+    def _associate_hungarian_batch(
+        self,
+        runtime: StreamRuntime,
+        detections: list[dict[str, Any]],
+        seen_local_ids: set[int],
+        now_ts: float,
+        assoc_iou_threshold: float,
+        assoc_center_max_px: float,
+    ) -> dict[int, int]:
+        """
+        Build a global one-to-one det-track assignment using Hungarian (lapjv).
+
+        Cost matrix details:
+        - IoU-accepted pairs: cost = 1 - IoU (preferred).
+        - Optional center fallback pairs (IoU below threshold but near center): cost in [1.5, 2.5].
+        - Forbidden pairs (class mismatch / too far): large dummy cost.
+
+        After solve, we still enforce the same quality gates before accepting a match.
+        """
+        if not detections or lapjv is None:
+            return {}
+
+        candidate_local_ids: list[int] = []
+        candidate_bboxes: list[tuple[float, float, float, float]] = []
+        candidate_classes: list[str] = []
+        for local_id, mem in runtime.tracks.items():
+            if local_id in seen_local_ids:
+                continue
+            if now_ts - mem.last_seen_ts > self.track_max_age_sec:
+                continue
+            prior_bbox = self._mem_bbox_for_assoc(mem)
+            if prior_bbox is None:
+                continue
+            candidate_local_ids.append(local_id)
+            candidate_bboxes.append(prior_bbox)
+            candidate_classes.append(str(mem.class_name))
+
+        if not candidate_local_ids:
+            return {}
+
+        det_count = len(detections)
+        track_count = len(candidate_local_ids)
+        forbidden_cost = 1e6
+        costs = np.full((det_count, track_count), forbidden_cost, dtype=np.float64)
+
+        for i, det in enumerate(detections):
+            det_bbox = det["bbox"]
+            det_class = str(det.get("class_name", ""))
+            for j in range(track_count):
+                if det_class and candidate_classes[j] and det_class != candidate_classes[j]:
+                    continue
+                prior_bbox = candidate_bboxes[j]
+                iou = self._bbox_iou(prior_bbox, det_bbox)
+                if iou >= assoc_iou_threshold:
+                    costs[i, j] = 1.0 - iou
+                    continue
+                if assoc_center_max_px > 0:
+                    dist = self._center_distance_px(prior_bbox, det_bbox)
+                    if dist <= assoc_center_max_px:
+                        # Keep center-only links valid but always worse than any IoU-valid link.
+                        costs[i, j] = 1.5 + (dist / max(1.0, assoc_center_max_px))
+
+        try:
+            _, assign_rows_to_cols, _ = lapjv(costs, extend_cost=True)
+        except Exception:
+            return {}
+
+        out: dict[int, int] = {}
+        for det_idx, track_col in enumerate(assign_rows_to_cols):
+            if track_col < 0 or track_col >= track_count:
+                continue
+            pair_cost = float(costs[det_idx, track_col])
+            if pair_cost >= forbidden_cost:
+                continue
+            prior_bbox = candidate_bboxes[track_col]
+            det_bbox = detections[det_idx]["bbox"]
+            iou = self._bbox_iou(prior_bbox, det_bbox)
+            if iou >= assoc_iou_threshold:
+                out[det_idx] = candidate_local_ids[track_col]
+                continue
+            if assoc_center_max_px > 0:
+                dist = self._center_distance_px(prior_bbox, det_bbox)
+                if dist <= assoc_center_max_px:
+                    out[det_idx] = candidate_local_ids[track_col]
+        return out
 
     def _bbox_iou(self, a: tuple[float, float, float, float], b: list[float]) -> float:
         ax1, ay1, ax2, ay2 = a
@@ -734,6 +952,52 @@ def _poly_to_points(poly: np.ndarray) -> list[list[int]]:
     return [[int(p[0]), int(p[1])] for p in poly.tolist()]
 
 
+def _bgr_rec601_luma_gray(image: np.ndarray) -> np.ndarray:
+    """Per-pixel luma (Rec.601) for BGR uint8 images."""
+    b = image[:, :, 0].astype(np.float32)
+    g = image[:, :, 1].astype(np.float32)
+    r = image[:, :, 2].astype(np.float32)
+    return r * 0.299 + g * 0.587 + b * 0.114
+
+
+def _apply_night_enhancement(image: np.ndarray) -> tuple[np.ndarray, bool, dict[str, float]]:
+    """CLAHE on L* channel for dark scenes. Gates on median luma so headlight bloom does not skip enhancement."""
+    meta: dict[str, float] = {"luma_mean": 0.0, "luma_median": 0.0}
+    if image.size == 0:
+        return image, False, meta
+    try:
+        gray = _bgr_rec601_luma_gray(image)
+        meta["luma_mean"] = float(np.mean(gray))
+        meta["luma_median"] = float(np.median(gray))
+    except Exception:
+        return image, False, meta
+    if not NIGHT_ENHANCE_ENABLED:
+        return image, False, meta
+    if meta["luma_median"] >= NIGHT_LUMA_MEDIAN_THRESHOLD:
+        return image, False, meta
+    try:
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l_chan, a_chan, b_chan = cv2.split(lab)
+        tile = max(2, NIGHT_CLAHE_TILE_SIZE)
+        clahe = cv2.createCLAHE(clipLimit=max(1.0, NIGHT_CLAHE_CLIP_LIMIT), tileGridSize=(tile, tile))
+        l_eq = clahe.apply(l_chan)
+        merged = cv2.merge((l_eq, a_chan, b_chan))
+        out = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+        return out, True, meta
+    except Exception:
+        return image, False, meta
+
+
+def _night_luma_median_threshold() -> float:
+    med = os.getenv("DETECTOR_NIGHT_LUMA_MEDIAN_THRESHOLD", "").strip()
+    if med:
+        try:
+            return float(med)
+        except ValueError:
+            pass
+    return _env_float("DETECTOR_NIGHT_LUMA_THRESHOLD", 105.0)
+
+
 TRACK_MAX_AGE_SEC = _env_float("DETECTOR_TRACK_MAX_AGE_SEC", 4.0)
 TRACK_MIN_HITS = _env_int("DETECTOR_TRACK_MIN_HITS", 2)
 SMOOTH_WINDOW_SEC = _env_float("DETECTOR_SMOOTH_WINDOW_SEC", 1.0)
@@ -744,6 +1008,19 @@ QUEUE_OCCUPANCY_THRESHOLD = _env_float("DETECTOR_QUEUE_OCCUPANCY_THRESHOLD", 0.1
 QUEUE_MIN_TRACKS = _env_int("DETECTOR_QUEUE_MIN_TRACKS", 4)
 TRACKER_CONFIG = os.getenv("DETECTOR_TRACKER_CONFIG", "bytetrack.yaml").strip() or "bytetrack.yaml"
 TRACK_ASSOC_IOU_THRESHOLD = _env_float("DETECTOR_TRACK_ASSOC_IOU_THRESHOLD", 0.25)
+# When >0: if IoU is below threshold (common at low detect FPS), still match the prior track
+# whose smoothed bbox center is nearest within this many pixels. Set 0 to disable.
+TRACK_ASSOC_CENTER_MAX_PX = _env_float("DETECTOR_TRACK_ASSOC_CENTER_MAX_PX", 96.0)
+# Preferred knob; keep *_ENABLED as a backward-compatible alias.
+TRACK_ASSOC_HUNGARIAN_ENABLED = _env_bool(
+    "DETECTOR_TRACK_ASSOC_HUNGARIAN",
+    _env_bool("DETECTOR_TRACK_ASSOC_HUNGARIAN_ENABLED", False),
+)
+BBOX_EMA_ALPHA = _env_float("DETECTOR_BBOX_EMA_ALPHA", 0.45)
+NIGHT_ENHANCE_ENABLED = _env_bool("DETECTOR_NIGHT_ENHANCE_ENABLED", True)
+NIGHT_LUMA_MEDIAN_THRESHOLD = _night_luma_median_threshold()
+NIGHT_CLAHE_CLIP_LIMIT = _env_float("DETECTOR_NIGHT_CLAHE_CLIP_LIMIT", 2.0)
+NIGHT_CLAHE_TILE_SIZE = _env_int("DETECTOR_NIGHT_CLAHE_TILE_SIZE", 8)
 DEFAULT_DEBUG_OVERLAY = _env_bool("DETECTOR_DEBUG_OVERLAY_DEFAULT", False)
 
 app = FastAPI(title="Traffic Detector Spike", version="0.2.0")
@@ -755,6 +1032,9 @@ mot_state = MOTStateStore(
     smooth_window_sec=max(0.25, SMOOTH_WINDOW_SEC),
     min_hits=TRACK_MIN_HITS,
     assoc_iou_threshold=TRACK_ASSOC_IOU_THRESHOLD,
+    bbox_ema_alpha=BBOX_EMA_ALPHA,
+    assoc_center_max_px=TRACK_ASSOC_CENTER_MAX_PX,
+    assoc_hungarian_enabled=TRACK_ASSOC_HUNGARIAN_ENABLED,
 )
 inference_lock = threading.Lock()
 
@@ -762,6 +1042,7 @@ inference_lock = threading.Lock()
 @app.get("/internal/health")
 def health() -> dict[str, Any]:
     loaded_ok = ROI_CONFIG.error == "" and len(ROI_CONFIG.stream_specs) > 0
+    assoc_mode = "hungarian" if TRACK_ASSOC_HUNGARIAN_ENABLED else "greedy"
     return {
         "ok": True,
         "model": model_name,
@@ -770,7 +1051,15 @@ def health() -> dict[str, Any]:
         "track_max_age_sec": TRACK_MAX_AGE_SEC,
         "track_min_hits": TRACK_MIN_HITS,
         "track_assoc_iou_threshold": TRACK_ASSOC_IOU_THRESHOLD,
+        "track_assoc_center_max_px": TRACK_ASSOC_CENTER_MAX_PX,
+        "track_assoc_hungarian_enabled": TRACK_ASSOC_HUNGARIAN_ENABLED,
+        "track_assoc_mode": assoc_mode,
+        "track_bbox_ema_alpha": BBOX_EMA_ALPHA,
         "smooth_window_sec": SMOOTH_WINDOW_SEC,
+        "night_enhance_enabled": NIGHT_ENHANCE_ENABLED,
+        "night_luma_median_threshold": NIGHT_LUMA_MEDIAN_THRESHOLD,
+        "night_clahe_clip_limit": NIGHT_CLAHE_CLIP_LIMIT,
+        "night_clahe_tile_size": NIGHT_CLAHE_TILE_SIZE,
         "roi_config_loaded": loaded_ok,
         "lane_geometry_source": ROI_CONFIG.source,
         "lane_geometry_schema_version": ROI_CONFIG.schema_version,
@@ -795,6 +1084,10 @@ async def detect(
     moving_speed_threshold_px_s: float = Query(12.0, ge=0.1, le=2000.0),
     smoothing_window_sec: float = Query(default=0.0),
     debug_overlay: bool = Query(default=DEFAULT_DEBUG_OVERLAY),
+    enhanced_preview: bool = Query(default=False),
+    track_assoc_iou_threshold: Optional[float] = Query(default=None, ge=0.05, le=0.95),
+    track_assoc_center_max_px: Optional[float] = Query(default=None, ge=0.0, le=400.0),
+    track_assoc_hungarian_enabled: Optional[bool] = Query(default=None),
 ) -> dict[str, Any]:
     image_bytes = await request.body()
     if not image_bytes:
@@ -804,6 +1097,7 @@ async def detect(
     image = cv2.imdecode(np_bytes, cv2.IMREAD_COLOR)
     if image is None:
         raise HTTPException(status_code=400, detail="failed to decode image bytes")
+    inference_image, night_applied, night_luma_meta = _apply_night_enhancement(image)
 
     height, width = image.shape[:2]
     geom = _resolve_geometry(stream_id=stream_id, width=width, height=height, roi_query=roi, direction_query=direction, lanes_query=lanes)
@@ -811,7 +1105,7 @@ async def detect(
     t0 = time.perf_counter()
     with inference_lock:
         results = model.track(
-            source=image,
+            source=inference_image,
             conf=conf,
             iou=iou,
             imgsz=imgsz,
@@ -853,7 +1147,15 @@ async def detect(
     if smoothing_window_sec > 0:
         mot_state.smooth_window_sec = max(0.25, min(2.0, smoothing_window_sec))
 
-    tracks = mot_state.update_tracks(stream_id=stream_id, detections=parsed_detections, direction=geom.direction, now_ts=now_ts)
+    tracks = mot_state.update_tracks(
+        stream_id=stream_id,
+        detections=parsed_detections,
+        direction=geom.direction,
+        now_ts=now_ts,
+        assoc_iou_threshold=track_assoc_iou_threshold,
+        assoc_center_max_px=track_assoc_center_max_px,
+        assoc_hungarian_enabled=track_assoc_hungarian_enabled,
+    )
     frame_seq = mot_state.frame_seq(stream_id)
 
     detections: list[dict[str, Any]] = []
@@ -949,11 +1251,31 @@ async def detect(
     moving_ratio = float(moving_count / total_tracks) if total_tracks > 0 else 0.0
     lane_status = _lane_assignment_status(geom.lane_assignment_reason, geom.lane_assignment_active)
 
+    iou_assoc_eff = (
+        float(track_assoc_iou_threshold) if track_assoc_iou_threshold is not None else TRACK_ASSOC_IOU_THRESHOLD
+    )
+    center_eff = (
+        float(track_assoc_center_max_px) if track_assoc_center_max_px is not None else TRACK_ASSOC_CENTER_MAX_PX
+    )
+    hungarian_eff = (
+        bool(track_assoc_hungarian_enabled)
+        if track_assoc_hungarian_enabled is not None
+        else TRACK_ASSOC_HUNGARIAN_ENABLED
+    )
+
     payload: dict[str, Any] = {
         "model": model_name,
         "device": device,
         "tracker": TRACKER_CONFIG,
         "inference_ms": round(inference_ms, 2),
+        "detector_tuning": {
+            "conf": conf,
+            "iou": iou,
+            "imgsz": imgsz,
+            "track_assoc_iou_threshold": round(iou_assoc_eff, 4),
+            "track_assoc_center_max_px": round(center_eff, 2),
+            "track_assoc_hungarian_enabled": bool(hungarian_eff),
+        },
         "image": {"width": width, "height": height},
         "geometry": {
             "road_polygon": _poly_to_points(geom.road_polygon),
@@ -1018,7 +1340,17 @@ async def detect(
             "queue_like": "heuristic: high occupancy + low median speed + enough tracked vehicles in ROI",
             "stopped_like": "heuristic: at least one mature ROI track below stopped speed threshold for minimum duration",
         },
+        "night_enhancement_applied": night_applied,
+        "frame_luma": {
+            "mean": round(night_luma_meta["luma_mean"], 2),
+            "median": round(night_luma_meta["luma_median"], 2),
+        },
     }
+
+    if enhanced_preview:
+        ok_enc, enc_buf = cv2.imencode(".jpg", inference_image, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
+        if ok_enc:
+            payload["enhanced_preview_jpeg_b64"] = base64.b64encode(enc_buf.tobytes()).decode("ascii")
 
     if debug_overlay:
         payload["debug_overlay_jpeg_b64"] = _debug_overlay(
