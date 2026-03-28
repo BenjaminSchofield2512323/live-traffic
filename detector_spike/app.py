@@ -16,6 +16,11 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from ultralytics import YOLO
 
+try:
+    from lap import lapjv
+except Exception:  # pragma: no cover - optional runtime fallback.
+    lapjv = None
+
 TARGET_CLASSES = {"car", "truck", "bus", "motorcycle"}
 LOGGER = logging.getLogger("detector_spike")
 
@@ -186,6 +191,7 @@ class MOTStateStore:
         assoc_iou_threshold: float,
         bbox_ema_alpha: float,
         assoc_center_max_px: float = 0.0,
+        assoc_hungarian_enabled: bool = False,
     ) -> None:
         self.track_max_age_sec = track_max_age_sec
         self.smooth_window_sec = smooth_window_sec
@@ -193,6 +199,7 @@ class MOTStateStore:
         self.assoc_iou_threshold = max(0.0, min(0.95, assoc_iou_threshold))
         self.bbox_ema_alpha = max(0.0, min(1.0, bbox_ema_alpha))
         self.assoc_center_max_px = max(0.0, assoc_center_max_px)
+        self.assoc_hungarian_enabled = bool(assoc_hungarian_enabled)
         self._lock = threading.Lock()
         self._streams: dict[str, StreamRuntime] = {}
 
@@ -204,6 +211,7 @@ class MOTStateStore:
         now_ts: float,
         assoc_iou_threshold: Optional[float] = None,
         assoc_center_max_px: Optional[float] = None,
+        assoc_hungarian_enabled: Optional[bool] = None,
     ) -> list[dict[str, Any]]:
         with self._lock:
             runtime = self._streams.setdefault(stream_id, StreamRuntime())
@@ -212,21 +220,66 @@ class MOTStateStore:
 
             out: list[dict[str, Any]] = []
             seen_local_ids: set[int] = set()
+            local_ids_by_det: list[int | None] = [None] * len(detections)
+            unresolved_det_indices: list[int] = []
+            iou_thr = self.assoc_iou_threshold if assoc_iou_threshold is None else max(
+                0.0, min(0.95, float(assoc_iou_threshold))
+            )
+            center_max = self.assoc_center_max_px if assoc_center_max_px is None else max(0.0, float(assoc_center_max_px))
+            use_hungarian = self.assoc_hungarian_enabled if assoc_hungarian_enabled is None else bool(assoc_hungarian_enabled)
 
-            for det in detections:
+            # Keep raw->local mapping path first; unresolved detections are associated as a batch.
+            for det_idx, det in enumerate(detections):
                 raw_track_id = det.get("_raw_track_id")
                 local_track_id = None
                 if isinstance(raw_track_id, int):
-                    local_track_id = runtime.raw_to_local.get(raw_track_id)
+                    candidate = runtime.raw_to_local.get(raw_track_id)
+                    if candidate is not None:
+                        mem = runtime.tracks.get(candidate)
+                        if mem is not None and candidate not in seen_local_ids and (now_ts - mem.last_seen_ts <= self.track_max_age_sec):
+                            local_track_id = candidate
                 if local_track_id is None:
-                    local_track_id = self._associate_by_iou(
-                        runtime=runtime,
-                        bbox=det["bbox"],
-                        seen_local_ids=seen_local_ids,
-                        now_ts=now_ts,
-                        assoc_iou_threshold=assoc_iou_threshold,
-                        assoc_center_max_px=assoc_center_max_px,
-                    )
+                    unresolved_det_indices.append(det_idx)
+                    continue
+                local_ids_by_det[det_idx] = local_track_id
+                seen_local_ids.add(local_track_id)
+
+            # Global one-to-one assignment avoids list-order swaps for nearby vehicles.
+            if use_hungarian and unresolved_det_indices:
+                det_batch = [detections[i] for i in unresolved_det_indices]
+                assignments = self._associate_hungarian_batch(
+                    runtime=runtime,
+                    detections=det_batch,
+                    seen_local_ids=seen_local_ids,
+                    now_ts=now_ts,
+                    assoc_iou_threshold=iou_thr,
+                    assoc_center_max_px=center_max,
+                )
+                for rel_det_idx, local_track_id in assignments.items():
+                    abs_det_idx = unresolved_det_indices[rel_det_idx]
+                    local_ids_by_det[abs_det_idx] = local_track_id
+                    seen_local_ids.add(local_track_id)
+
+            # Greedy fallback for unmatched detections (or when Hungarian is disabled/unavailable).
+            for det_idx in unresolved_det_indices:
+                if local_ids_by_det[det_idx] is not None:
+                    continue
+                det = detections[det_idx]
+                local_track_id = self._associate_by_iou(
+                    runtime=runtime,
+                    bbox=det["bbox"],
+                    seen_local_ids=seen_local_ids,
+                    now_ts=now_ts,
+                    assoc_iou_threshold=iou_thr,
+                    assoc_center_max_px=center_max,
+                )
+                if local_track_id is not None:
+                    local_ids_by_det[det_idx] = local_track_id
+                    seen_local_ids.add(local_track_id)
+
+            for det_idx, det in enumerate(detections):
+                raw_track_id = det.get("_raw_track_id")
+                local_track_id = local_ids_by_det[det_idx]
                 if local_track_id is None:
                     local_track_id = runtime.alloc_track_id()
                 if isinstance(raw_track_id, int):
@@ -272,7 +325,6 @@ class MOTStateStore:
                 else:
                     mem.low_speed_since_ts = None
 
-                seen_local_ids.add(local_track_id)
                 out.append(
                     {
                         "track_id": local_track_id,
@@ -404,6 +456,92 @@ class MOTStateStore:
         if best_center_id is not None:
             return best_center_id
         return None
+
+    def _associate_hungarian_batch(
+        self,
+        runtime: StreamRuntime,
+        detections: list[dict[str, Any]],
+        seen_local_ids: set[int],
+        now_ts: float,
+        assoc_iou_threshold: float,
+        assoc_center_max_px: float,
+    ) -> dict[int, int]:
+        """
+        Build a global one-to-one det-track assignment using Hungarian (lapjv).
+
+        Cost matrix details:
+        - IoU-accepted pairs: cost = 1 - IoU (preferred).
+        - Optional center fallback pairs (IoU below threshold but near center): cost in [1.5, 2.5].
+        - Forbidden pairs (class mismatch / too far): large dummy cost.
+
+        After solve, we still enforce the same quality gates before accepting a match.
+        """
+        if not detections or lapjv is None:
+            return {}
+
+        candidate_local_ids: list[int] = []
+        candidate_bboxes: list[tuple[float, float, float, float]] = []
+        candidate_classes: list[str] = []
+        for local_id, mem in runtime.tracks.items():
+            if local_id in seen_local_ids:
+                continue
+            if now_ts - mem.last_seen_ts > self.track_max_age_sec:
+                continue
+            prior_bbox = self._mem_bbox_for_assoc(mem)
+            if prior_bbox is None:
+                continue
+            candidate_local_ids.append(local_id)
+            candidate_bboxes.append(prior_bbox)
+            candidate_classes.append(str(mem.class_name))
+
+        if not candidate_local_ids:
+            return {}
+
+        det_count = len(detections)
+        track_count = len(candidate_local_ids)
+        forbidden_cost = 1e6
+        costs = np.full((det_count, track_count), forbidden_cost, dtype=np.float64)
+
+        for i, det in enumerate(detections):
+            det_bbox = det["bbox"]
+            det_class = str(det.get("class_name", ""))
+            for j in range(track_count):
+                if det_class and candidate_classes[j] and det_class != candidate_classes[j]:
+                    continue
+                prior_bbox = candidate_bboxes[j]
+                iou = self._bbox_iou(prior_bbox, det_bbox)
+                if iou >= assoc_iou_threshold:
+                    costs[i, j] = 1.0 - iou
+                    continue
+                if assoc_center_max_px > 0:
+                    dist = self._center_distance_px(prior_bbox, det_bbox)
+                    if dist <= assoc_center_max_px:
+                        # Keep center-only links valid but always worse than any IoU-valid link.
+                        costs[i, j] = 1.5 + (dist / max(1.0, assoc_center_max_px))
+
+        try:
+            _, assign_rows_to_cols, _ = lapjv(costs, extend_cost=True)
+        except Exception:
+            return {}
+
+        out: dict[int, int] = {}
+        for det_idx, track_col in enumerate(assign_rows_to_cols):
+            if track_col < 0 or track_col >= track_count:
+                continue
+            pair_cost = float(costs[det_idx, track_col])
+            if pair_cost >= forbidden_cost:
+                continue
+            prior_bbox = candidate_bboxes[track_col]
+            det_bbox = detections[det_idx]["bbox"]
+            iou = self._bbox_iou(prior_bbox, det_bbox)
+            if iou >= assoc_iou_threshold:
+                out[det_idx] = candidate_local_ids[track_col]
+                continue
+            if assoc_center_max_px > 0:
+                dist = self._center_distance_px(prior_bbox, det_bbox)
+                if dist <= assoc_center_max_px:
+                    out[det_idx] = candidate_local_ids[track_col]
+        return out
 
     def _bbox_iou(self, a: tuple[float, float, float, float], b: list[float]) -> float:
         ax1, ay1, ax2, ay2 = a
@@ -873,6 +1011,7 @@ TRACK_ASSOC_IOU_THRESHOLD = _env_float("DETECTOR_TRACK_ASSOC_IOU_THRESHOLD", 0.2
 # When >0: if IoU is below threshold (common at low detect FPS), still match the prior track
 # whose smoothed bbox center is nearest within this many pixels. Set 0 to disable.
 TRACK_ASSOC_CENTER_MAX_PX = _env_float("DETECTOR_TRACK_ASSOC_CENTER_MAX_PX", 96.0)
+TRACK_ASSOC_HUNGARIAN_ENABLED = _env_bool("DETECTOR_TRACK_ASSOC_HUNGARIAN_ENABLED", False)
 BBOX_EMA_ALPHA = _env_float("DETECTOR_BBOX_EMA_ALPHA", 0.45)
 NIGHT_ENHANCE_ENABLED = _env_bool("DETECTOR_NIGHT_ENHANCE_ENABLED", True)
 NIGHT_LUMA_MEDIAN_THRESHOLD = _night_luma_median_threshold()
@@ -891,6 +1030,7 @@ mot_state = MOTStateStore(
     assoc_iou_threshold=TRACK_ASSOC_IOU_THRESHOLD,
     bbox_ema_alpha=BBOX_EMA_ALPHA,
     assoc_center_max_px=TRACK_ASSOC_CENTER_MAX_PX,
+    assoc_hungarian_enabled=TRACK_ASSOC_HUNGARIAN_ENABLED,
 )
 inference_lock = threading.Lock()
 
@@ -907,6 +1047,7 @@ def health() -> dict[str, Any]:
         "track_min_hits": TRACK_MIN_HITS,
         "track_assoc_iou_threshold": TRACK_ASSOC_IOU_THRESHOLD,
         "track_assoc_center_max_px": TRACK_ASSOC_CENTER_MAX_PX,
+        "track_assoc_hungarian_enabled": TRACK_ASSOC_HUNGARIAN_ENABLED,
         "track_bbox_ema_alpha": BBOX_EMA_ALPHA,
         "smooth_window_sec": SMOOTH_WINDOW_SEC,
         "night_enhance_enabled": NIGHT_ENHANCE_ENABLED,
@@ -940,6 +1081,7 @@ async def detect(
     enhanced_preview: bool = Query(default=False),
     track_assoc_iou_threshold: Optional[float] = Query(default=None, ge=0.05, le=0.95),
     track_assoc_center_max_px: Optional[float] = Query(default=None, ge=0.0, le=400.0),
+    track_assoc_hungarian_enabled: Optional[bool] = Query(default=None),
 ) -> dict[str, Any]:
     image_bytes = await request.body()
     if not image_bytes:
@@ -1006,6 +1148,7 @@ async def detect(
         now_ts=now_ts,
         assoc_iou_threshold=track_assoc_iou_threshold,
         assoc_center_max_px=track_assoc_center_max_px,
+        assoc_hungarian_enabled=track_assoc_hungarian_enabled,
     )
     frame_seq = mot_state.frame_seq(stream_id)
 
@@ -1108,6 +1251,11 @@ async def detect(
     center_eff = (
         float(track_assoc_center_max_px) if track_assoc_center_max_px is not None else TRACK_ASSOC_CENTER_MAX_PX
     )
+    hungarian_eff = (
+        bool(track_assoc_hungarian_enabled)
+        if track_assoc_hungarian_enabled is not None
+        else TRACK_ASSOC_HUNGARIAN_ENABLED
+    )
 
     payload: dict[str, Any] = {
         "model": model_name,
@@ -1120,6 +1268,7 @@ async def detect(
             "imgsz": imgsz,
             "track_assoc_iou_threshold": round(iou_assoc_eff, 4),
             "track_assoc_center_max_px": round(center_eff, 2),
+            "track_assoc_hungarian_enabled": bool(hungarian_eff),
         },
         "image": {"width": width, "height": height},
         "geometry": {
