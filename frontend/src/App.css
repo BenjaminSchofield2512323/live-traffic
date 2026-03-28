@@ -76,35 +76,21 @@ body {
 }
 
 .metricsSection,
-.signalSection,
 .alertsSection,
 .recommendedSection {
   margin: 0;
 }
 
-.signalSection {
-  padding: 1rem 1.25rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-
-.signalChips {
+.cameraCardNoThumb {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.signalChip {
-  display: inline-block;
-  padding: 0.35rem 0.75rem;
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: var(--textSoft);
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  align-items: center;
+  justify-content: center;
+  min-height: 140px;
+  background: #0f172a;
+  color: #94a3b8;
+  font-size: 0.85rem;
+  padding: 0.75rem;
+  text-align: center;
 }
 
 .btn {
@@ -679,6 +665,26 @@ body {
   font-size: 0.88rem;
 }
 
+.recommendedControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+
+.recommendedPaging {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.recommendedPagingLabel {
+  font-size: 0.86rem;
+  color: var(--textSoft);
+}
+
 .focusPanel {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -978,4 +984,16 @@ body {
 
 .focusEntityTable tbody tr:last-child td {
   border-bottom: none;
+}
+
+.cameraStreamWrap {
+  margin-top: 0.6rem;
+}
+
+.cameraStreamPreview {
+  width: 100%;
+  max-height: 180px;
+  background: #0f172a;
+  border-radius: var(--radiusSm);
+  display: block;
 }

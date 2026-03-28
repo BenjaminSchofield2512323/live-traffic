@@ -38,6 +38,10 @@ const (
 	defaultAlertListLimit = 50
 	minAlertListLimit     = 1
 	maxAlertListLimit     = 200
+
+	defaultExternalPageSize = 5
+	minExternalPageSize     = 1
+	maxExternalPageSize     = 10
 )
 
 var targetCorridors = []string{"I-95", "I-87", "I-278", "I-495", "I-678", "I-290", "I-81", "I-490", "I-787", "I-90"}
@@ -112,13 +116,45 @@ func main() {
 			return
 		}
 
+		includeEarthCam := boolQuery(r, "include_earthcam", false)
+		page := boundedIntQuery(r, "page", 1, 1, 1000)
+		pageSize := boundedIntQuery(r, "page_size", defaultExternalPageSize, minExternalPageSize, maxExternalPageSize)
+
 		recommended := selectLiveRecommended(ctx, client, allCameras, count)
+		data := make([]scoredCamera, 0, len(recommended)+1)
+		data = append(data, recommended...)
+		external := listExternalCameras(ctx, includeEarthCam)
+		externalTotal := len(external)
+		startIdx := (page - 1) * pageSize
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		endIdx := startIdx + pageSize
+		if endIdx > externalTotal {
+			endIdx = externalTotal
+		}
+		pagedExternal := make([]externalSourceCamera, 0, maxInt(0, endIdx-startIdx))
+		if startIdx < externalTotal {
+			pagedExternal = append(pagedExternal, external[startIdx:endIdx]...)
+			for _, ec := range (earthCamPageResult{Data: pagedExternal}).asScored() {
+				data = append(data, ec)
+			}
+		}
+		hasNextPage := endIdx < externalTotal
 		writeJSON(w, http.StatusOK, map[string]any{
-			"count":           len(recommended),
+			"count":           len(data),
 			"requested_count": count,
 			"live_validated":  true,
 			"targets":         targetCorridors,
-			"data":            recommended,
+			"include_earthcam": includeEarthCam,
+			"earthcam": map[string]any{
+				"count":         len(pagedExternal),
+				"total":         externalTotal,
+				"page":          page,
+				"page_size":     pageSize,
+				"has_next_page": hasNextPage,
+			},
+			"data": data,
 		})
 	}))
 
@@ -195,6 +231,8 @@ func main() {
 		})
 	}))
 
+	mux.HandleFunc("/api/v1/stream/hls-proxy", withCORS(handleEarthCamHLSProxy))
+
 	mux.HandleFunc("/api/v1/pipeline/focus/stream", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
@@ -254,10 +292,6 @@ func main() {
 		cameraID := intQuery(r, "camera_id", 0)
 		if cameraID <= 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "camera_id is required"})
-			return
-		}
-		if !pipeline.HasCamera(cameraID) {
-			writeJSON(w, http.StatusNotFound, map[string]any{"error": "camera not active in current pipeline"})
 			return
 		}
 
@@ -583,6 +617,8 @@ type camera struct {
 	Region    string       `json:"region"`
 	County    string       `json:"county"`
 	City      string       `json:"city"`
+	Source    string       `json:"source,omitempty"`
+	PageURL   string       `json:"page_url,omitempty"`
 	Images    []cameraFeed `json:"images"`
 }
 
