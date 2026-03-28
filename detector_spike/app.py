@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -15,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from ultralytics import YOLO
 
 TARGET_CLASSES = {"car", "truck", "bus", "motorcycle"}
+LOGGER = logging.getLogger("detector_spike")
 
 
 def _env_float(key: str, default: float) -> float:
@@ -107,6 +110,7 @@ def _occupancy_ratio(detections: list[dict[str, Any]], roi_poly: np.ndarray, wid
 class LaneDef:
     lane_id: str
     polygon: np.ndarray
+    priority: int = 0
 
 
 @dataclass
@@ -114,6 +118,36 @@ class Geometry:
     road_polygon: np.ndarray
     direction: tuple[float, float]
     lanes: list[LaneDef]
+    lane_assignment_active: bool = False
+    lane_assignment_reason: str = "missing_config"
+    coordinate_space: str = "decoded_frame_pixels"
+    detector_input_resolution: tuple[int, int] | None = None
+    homography: list[list[float]] | None = None
+
+
+@dataclass
+class LaneGeometryStore:
+    schema_version: str = "lane-geometry-v1"
+    coordinate_space: str = "decoded_frame_pixels"
+    lane_assignment_anchor: str = "bbox_bottom_center"
+    overlap_tiebreak: str = "config_order"
+    lane_id_unknown_label: str = "unknown"
+    detector_input_resolution: tuple[int, int] | None = None
+    stream_specs: dict[str, "StreamGeometrySpec"] = field(default_factory=dict)
+    stream_errors: dict[str, str] = field(default_factory=dict)
+    source: str = "none"
+    error: str = ""
+
+
+@dataclass
+class StreamGeometrySpec:
+    stream_key: str
+    lanes: list[LaneDef]
+    source: str
+    input_resolution: tuple[int, int] | None = None
+    road_polygon: np.ndarray | None = None
+    direction: tuple[float, float] | None = None
+    homography: list[list[float]] | None = None
 
 
 @dataclass
@@ -276,18 +310,163 @@ def _load_model() -> tuple[YOLO, str]:
     return YOLO(model_name), model_name
 
 
-def _load_roi_config() -> dict[str, Any]:
+def _parse_resolution(raw: Any) -> tuple[int, int] | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        w = int(raw.get("width"))
+        h = int(raw.get("height"))
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return (w, h)
+
+
+def _poly_area(poly: np.ndarray) -> float:
+    if poly.size == 0 or len(poly) < 3:
+        return 0.0
+    x = poly[:, 0].astype(np.float64)
+    y = poly[:, 1].astype(np.float64)
+    return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2.0)
+
+
+def _scale_polygon(poly: np.ndarray, src_size: tuple[int, int], dst_size: tuple[int, int]) -> np.ndarray:
+    src_w, src_h = src_size
+    dst_w, dst_h = dst_size
+    if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
+        return poly.astype(np.int32)
+    sx = float(dst_w) / float(src_w)
+    sy = float(dst_h) / float(src_h)
+    scaled = poly.astype(np.float32).copy()
+    scaled[:, 0] = scaled[:, 0] * sx
+    scaled[:, 1] = scaled[:, 1] * sy
+    scaled[:, 0] = np.clip(scaled[:, 0], 0, max(0, dst_w - 1))
+    scaled[:, 1] = np.clip(scaled[:, 1], 0, max(0, dst_h - 1))
+    return np.round(scaled).astype(np.int32)
+
+
+def _load_roi_config() -> LaneGeometryStore:
     path = os.getenv("DETECTOR_ROI_CONFIG_PATH", "").strip()
     if not path:
-        return {}
+        return LaneGeometryStore(source="none", error="missing_config_path")
+    path_obj = Path(path).expanduser()
+    if not path_obj.exists():
+        return LaneGeometryStore(source=str(path_obj), error="config_path_not_found")
+    if not path_obj.is_file():
+        return LaneGeometryStore(source=str(path_obj), error="config_path_not_file")
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with path_obj.open("r", encoding="utf-8") as f:
             payload = json.load(f)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        return {}
-    return {}
+    except Exception as exc:
+        return LaneGeometryStore(source=str(path_obj), error=f"config_read_error: {exc}")
+
+    if not isinstance(payload, dict):
+        return LaneGeometryStore(source=str(path_obj), error="invalid_root_object")
+    schema = str(payload.get("schema_version", "")).strip()
+    if schema != "lane-geometry-v1":
+        return LaneGeometryStore(source=str(path_obj), error=f"unsupported_schema_version:{schema or 'empty'}")
+
+    coordinate_space = str(payload.get("coordinate_space", "decoded_frame_pixels")).strip() or "decoded_frame_pixels"
+    lane_assignment_anchor = str(payload.get("lane_assignment_anchor", "bbox_bottom_center")).strip() or "bbox_bottom_center"
+    overlap_tiebreak = str(payload.get("overlap_tiebreak", "config_order")).strip() or "config_order"
+    unknown_label = str(payload.get("lane_id_unknown_label", "unknown")).strip() or "unknown"
+    default_resolution = _parse_resolution(payload.get("detector_input_resolution"))
+    streams_raw = payload.get("streams")
+    if not isinstance(streams_raw, dict):
+        return LaneGeometryStore(source=str(path_obj), error="streams_missing_or_invalid")
+
+    store = LaneGeometryStore(
+        schema_version=schema,
+        coordinate_space=coordinate_space,
+        lane_assignment_anchor=lane_assignment_anchor,
+        overlap_tiebreak=overlap_tiebreak,
+        lane_id_unknown_label=unknown_label,
+        detector_input_resolution=default_resolution,
+        stream_specs={},
+        stream_errors={},
+        source=str(path_obj),
+        error="",
+    )
+    for stream_key, spec_raw in streams_raw.items():
+        stream_id = str(stream_key).strip()
+        if not stream_id:
+            continue
+        if not isinstance(spec_raw, dict):
+            store.stream_errors[stream_id] = "stream_spec_not_object"
+            continue
+
+        spec_res = _parse_resolution(spec_raw.get("detector_input_resolution")) or default_resolution
+        parse_w = spec_res[0] if spec_res else 8192
+        parse_h = spec_res[1] if spec_res else 8192
+        lanes_raw = spec_raw.get("lanes")
+        if not isinstance(lanes_raw, list) or len(lanes_raw) == 0:
+            store.stream_errors[stream_id] = "lanes_missing_or_empty"
+            continue
+
+        lanes: list[LaneDef] = []
+        lane_valid = True
+        for idx, lane_raw in enumerate(lanes_raw):
+            if not isinstance(lane_raw, dict):
+                lane_valid = False
+                break
+            lane_id = str(lane_raw.get("lane_id", "")).strip()
+            if not lane_id:
+                lane_valid = False
+                break
+            lane_poly = _parse_polygon_points(lane_raw.get("polygon"), parse_w, parse_h)
+            if lane_poly is None:
+                lane_valid = False
+                break
+            try:
+                priority = int(lane_raw.get("priority", idx))
+            except (TypeError, ValueError):
+                lane_valid = False
+                break
+            lanes.append(LaneDef(lane_id=lane_id, polygon=lane_poly, priority=priority))
+
+        if not lane_valid or not lanes:
+            store.stream_errors[stream_id] = "invalid_lane_geometry"
+            continue
+
+        direction_val: tuple[float, float] | None = None
+        raw_direction = spec_raw.get("direction")
+        if isinstance(raw_direction, list) and len(raw_direction) == 2:
+            try:
+                direction_val = _safe_norm(float(raw_direction[0]), float(raw_direction[1]))
+            except (TypeError, ValueError):
+                direction_val = None
+
+        road_poly = _parse_polygon_points(spec_raw.get("road_polygon"), parse_w, parse_h)
+        homography = spec_raw.get("homography")
+        if homography is not None:
+            if (
+                not isinstance(homography, list)
+                or len(homography) != 3
+                or any((not isinstance(row, list)) or len(row) != 3 for row in homography)
+            ):
+                homography = None
+
+        store.stream_specs[stream_id] = StreamGeometrySpec(
+            stream_key=stream_id,
+            lanes=lanes,
+            source=str(path_obj),
+            input_resolution=spec_res,
+            road_polygon=road_poly,
+            direction=direction_val,
+            homography=homography if isinstance(homography, list) else None,
+        )
+    if store.error:
+        LOGGER.warning("lane geometry config invalid: source=%s error=%s", store.source, store.error)
+    elif store.stream_errors:
+        LOGGER.warning(
+            "lane geometry config loaded with stream errors: source=%s bad_streams=%s",
+            store.source,
+            sorted(store.stream_errors.keys()),
+        )
+    else:
+        LOGGER.info("lane geometry config loaded: source=%s streams=%d", store.source, len(store.stream_specs))
+    return store
 
 
 def _parse_polygon_points(raw_points: Any, width: int, height: int) -> np.ndarray | None:
@@ -319,43 +498,18 @@ def _parse_lanes_json(raw_lanes: str, width: int, height: int) -> list[LaneDef]:
     for i, lane in enumerate(parsed):
         if not isinstance(lane, dict):
             continue
-        lane_id = str(lane.get("id", f"lane_{i+1}"))
+        lane_id = str(lane.get("lane_id", lane.get("id", f"lane_{i+1}"))).strip()
+        if not lane_id:
+            continue
         poly = _parse_polygon_points(lane.get("polygon"), width, height)
         if poly is None:
             continue
-        out.append(LaneDef(lane_id=lane_id, polygon=poly))
+        try:
+            priority = int(lane.get("priority", i))
+        except (TypeError, ValueError):
+            priority = i
+        out.append(LaneDef(lane_id=lane_id, polygon=poly, priority=priority))
     return out
-
-
-def _default_lane_defs(width: int, height: int, lane_count: int = 4) -> list[LaneDef]:
-    """
-    Build visible fallback lane polygons when no camera-specific lane config exists.
-    This is an approximation for UI visualization only (not calibrated geometry).
-    """
-    lane_count = max(2, min(6, lane_count))
-    y_top = int(height * 0.42)
-    y_bottom = height - 1
-    x_mid = width / 2.0
-    # Narrower road width near horizon, wider near bottom to mimic perspective.
-    top_half_w = width * 0.18
-    bot_half_w = width * 0.45
-
-    top_left = x_mid - top_half_w
-    top_right = x_mid + top_half_w
-    bot_left = x_mid - bot_half_w
-    bot_right = x_mid + bot_half_w
-
-    lanes: list[LaneDef] = []
-    for i in range(lane_count):
-        f0 = i / lane_count
-        f1 = (i + 1) / lane_count
-        p1 = [int(top_left + (top_right - top_left) * f0), y_top]
-        p2 = [int(top_left + (top_right - top_left) * f1), y_top]
-        p3 = [int(bot_left + (bot_right - bot_left) * f1), y_bottom]
-        p4 = [int(bot_left + (bot_right - bot_left) * f0), y_bottom]
-        poly = np.array([p1, p2, p3, p4], dtype=np.int32)
-        lanes.append(LaneDef(lane_id=f"lane_{i+1}", polygon=poly))
-    return lanes
 
 
 def _resolve_geometry(
@@ -366,57 +520,120 @@ def _resolve_geometry(
     direction_query: str,
     lanes_query: str,
 ) -> Geometry:
-    cfg = ROI_CONFIG.get(stream_id) or ROI_CONFIG.get("default") or {}
-
-    road_polygon = _parse_polygon_points(cfg.get("road_polygon"), width, height)
-    if road_polygon is None:
-        road_polygon = np.array(
-            [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
-            dtype=np.int32,
-        )
-
-    if roi_query.strip():
-        road_polygon = _parse_roi_points(roi_query, width, height)
-
+    full_frame = np.array(
+        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+        dtype=np.int32,
+    )
     direction = _safe_norm(1.0, 0.0)
-    cfg_dir = cfg.get("direction")
-    if isinstance(cfg_dir, list) and len(cfg_dir) == 2:
-        try:
-            direction = _safe_norm(float(cfg_dir[0]), float(cfg_dir[1]))
-        except (TypeError, ValueError):
-            pass
     parsed_direction = _parse_direction(direction_query)
     if parsed_direction is not None:
         direction = parsed_direction
 
-    lanes: list[LaneDef] = []
-    cfg_lanes = cfg.get("lanes")
-    if isinstance(cfg_lanes, list):
-        for i, lane in enumerate(cfg_lanes):
-            if not isinstance(lane, dict):
-                continue
-            lane_id = str(lane.get("id", f"lane_{i+1}"))
-            poly = _parse_polygon_points(lane.get("polygon"), width, height)
-            if poly is None:
-                continue
-            lanes.append(LaneDef(lane_id=lane_id, polygon=poly))
-
     query_lanes = _parse_lanes_json(lanes_query, width, height)
     if query_lanes:
-        lanes = query_lanes
+        road_polygon = _parse_roi_points(roi_query, width, height) if roi_query.strip() else full_frame
+        return Geometry(
+            road_polygon=road_polygon,
+            direction=direction,
+            lanes=query_lanes,
+            lane_assignment_active=True,
+            lane_assignment_reason="query_override",
+            coordinate_space="decoded_frame_pixels",
+            detector_input_resolution=(width, height),
+            homography=None,
+        )
 
-    if not lanes:
-        lanes = _default_lane_defs(width=width, height=height, lane_count=4)
+    spec = ROI_CONFIG.stream_specs.get(stream_id)
+    if spec is None:
+        reason = ROI_CONFIG.stream_errors.get(stream_id, "missing_stream_geometry")
+        road_polygon = _parse_roi_points(roi_query, width, height) if roi_query.strip() else full_frame
+        return Geometry(
+            road_polygon=road_polygon,
+            direction=direction,
+            lanes=[],
+            lane_assignment_active=False,
+            lane_assignment_reason=reason,
+            coordinate_space=ROI_CONFIG.coordinate_space,
+            detector_input_resolution=(width, height),
+            homography=None,
+        )
 
-    return Geometry(road_polygon=road_polygon, direction=direction, lanes=lanes)
+    spec_dir = spec.direction if spec.direction is not None else direction
+    direction = parsed_direction if parsed_direction is not None else spec_dir
+    src_size = spec.input_resolution if spec.input_resolution else (width, height)
+    dst_size = (width, height)
+    scaled_lanes = [
+        LaneDef(
+            lane_id=lane.lane_id,
+            polygon=_scale_polygon(lane.polygon, src_size=src_size, dst_size=dst_size)
+            if src_size != dst_size
+            else lane.polygon.copy(),
+            priority=lane.priority,
+        )
+        for lane in spec.lanes
+    ]
+    if ROI_CONFIG.overlap_tiebreak == "largest_area":
+        scaled_lanes.sort(key=lambda lane: _poly_area(lane.polygon), reverse=True)
+    else:
+        scaled_lanes.sort(key=lambda lane: lane.priority)
+
+    if roi_query.strip():
+        road_polygon = _parse_roi_points(roi_query, width, height)
+    elif spec.road_polygon is not None:
+        road_polygon = (
+            _scale_polygon(spec.road_polygon, src_size=src_size, dst_size=dst_size)
+            if src_size != dst_size
+            else spec.road_polygon.copy()
+        )
+    else:
+        road_polygon = full_frame
+
+    return Geometry(
+        road_polygon=road_polygon,
+        direction=direction,
+        lanes=scaled_lanes,
+        lane_assignment_active=True,
+        lane_assignment_reason="ok",
+        coordinate_space=ROI_CONFIG.coordinate_space,
+        detector_input_resolution=dst_size,
+        homography=spec.homography,
+    )
+
+
+def _resolve_assignment_point(
+    geom: Geometry,
+    bbox: list[float],
+    cx: float,
+    cy: float,
+    bottom_center: list[float],
+) -> tuple[float, float]:
+    anchor = ROI_CONFIG.lane_assignment_anchor
+    if anchor == "bbox_center":
+        return (float(cx), float(cy))
+    if anchor == "bbox_footprint_center":
+        x1, _, x2, y2 = bbox
+        return (float((x1 + x2) / 2.0), float(y2))
+    # default / bbox_bottom_center
+    return (float(bottom_center[0]), float(bottom_center[1]))
+
+
+def _lane_assignment_status(reason: str, active: bool) -> str:
+    if active:
+        return "ok"
+    lowered = reason.lower()
+    if "missing" in lowered or "not_found" in lowered:
+        return "missing"
+    if "invalid" in lowered or "unsupported" in lowered or "error" in lowered:
+        return "invalid"
+    return "disabled"
 
 
 def _resolve_lane_id(geom: Geometry, x: float, y: float) -> str | None:
+    if not geom.lane_assignment_active or not geom.lanes:
+        return None
     for lane in geom.lanes:
         if _poly_contains(lane.polygon, x, y):
             return lane.lane_id
-    if _poly_contains(geom.road_polygon, x, y):
-        return "road"
     return None
 
 
@@ -490,6 +707,7 @@ inference_lock = threading.Lock()
 
 @app.get("/internal/health")
 def health() -> dict[str, Any]:
+    loaded_ok = ROI_CONFIG.error == "" and len(ROI_CONFIG.stream_specs) > 0
     return {
         "ok": True,
         "model": model_name,
@@ -498,7 +716,14 @@ def health() -> dict[str, Any]:
         "track_max_age_sec": TRACK_MAX_AGE_SEC,
         "track_min_hits": TRACK_MIN_HITS,
         "smooth_window_sec": SMOOTH_WINDOW_SEC,
-        "roi_config_loaded": bool(ROI_CONFIG),
+        "roi_config_loaded": loaded_ok,
+        "lane_geometry_source": ROI_CONFIG.source,
+        "lane_geometry_schema_version": ROI_CONFIG.schema_version,
+        "lane_geometry_error": ROI_CONFIG.error or None,
+        "lane_geometry_stream_count": len(ROI_CONFIG.stream_specs),
+        "lane_geometry_stream_errors": ROI_CONFIG.stream_errors,
+        "lane_assignment_anchor": ROI_CONFIG.lane_assignment_anchor,
+        "lane_overlap_tiebreak": ROI_CONFIG.overlap_tiebreak,
     }
 
 
@@ -586,8 +811,14 @@ async def detect(
     for t in tracks:
         cx = float(t["cx"])
         cy = float(t["cy"])
-        bcx, bcy = t["bottom_center"]
-        lane_id = _resolve_lane_id(geom, float(bcx), float(bcy))
+        assignment_x, assignment_y = _resolve_assignment_point(
+            geom=geom,
+            bbox=t["bbox"],
+            cx=cx,
+            cy=cy,
+            bottom_center=t["bottom_center"],
+        )
+        lane_id = _resolve_lane_id(geom, float(assignment_x), float(assignment_y))
         in_roi = bool(lane_id is not None and lane_id != "")
         if in_roi:
             lane_counts[lane_id] = lane_counts.get(lane_id, 0) + 1
@@ -612,6 +843,7 @@ async def detect(
             "speed_px_s": speed_px_s,
             "speed_signed_px_s": float(t["speed_signed_px_s"]),
             "lane_id": lane_id,
+            "lane_anchor_point": [float(assignment_x), float(assignment_y)],
             "in_roi": in_roi,
             "hits": int(t["hits"]),
             "is_mature": bool(t["is_mature"]),
@@ -632,6 +864,7 @@ async def detect(
                 "speed_px_s": speed_px_s,
                 "is_moving": is_moving,
                 "lane_id": lane_id,
+                "lane_anchor_point": [float(assignment_x), float(assignment_y)],
                 "smoothed_speed_px_s": speed_px_s,
             }
         )
@@ -659,6 +892,7 @@ async def detect(
     total_tracks = len(tracks)
     stationary_count = max(0, total_tracks - moving_count)
     moving_ratio = float(moving_count / total_tracks) if total_tracks > 0 else 0.0
+    lane_status = _lane_assignment_status(geom.lane_assignment_reason, geom.lane_assignment_active)
 
     payload: dict[str, Any] = {
         "model": model_name,
@@ -670,7 +904,17 @@ async def detect(
             "road_polygon": _poly_to_points(geom.road_polygon),
             "lanes": [{"lane_id": lane.lane_id, "polygon": _poly_to_points(lane.polygon)} for lane in geom.lanes],
             "direction": [float(geom.direction[0]), float(geom.direction[1])],
+            "coordinate_space": geom.coordinate_space,
+            "detector_input_resolution": (
+                {"width": int(geom.detector_input_resolution[0]), "height": int(geom.detector_input_resolution[1])}
+                if geom.detector_input_resolution is not None
+                else None
+            ),
+            "homography": geom.homography,
+            "lane_assignment_anchor": ROI_CONFIG.lane_assignment_anchor,
         },
+        "lane_assignment_status": lane_status,
+        "lane_assignment_detail": geom.lane_assignment_reason,
         "stream_id": stream_id,
         "frame_seq": frame_seq,
         "frame_ts_unix_ms": frame_ts_unix_ms,
