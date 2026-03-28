@@ -199,6 +199,7 @@ export function FocusStreamFrames({
   detectImgsz = 640,
   trackAssocIou = 0.25,
   trackAssocCenterPx = 96,
+  detectClasses = '',
   localLaneGeometry = null,
   laneEditMode = false,
   onLaneGeometryChange,
@@ -234,6 +235,7 @@ export function FocusStreamFrames({
     imgsz: detectImgsz,
     trackAssocIou,
     trackAssocCenterPx,
+    detectClasses,
   })
   const latestFrameSizeRef = useRef({ width: 0, height: 0 })
   const draftPolyRef = useRef([])
@@ -261,8 +263,9 @@ export function FocusStreamFrames({
       imgsz: detectImgsz,
       trackAssocIou,
       trackAssocCenterPx,
+      detectClasses,
     }
-  }, [detectConf, detectIou, detectImgsz, trackAssocIou, trackAssocCenterPx])
+  }, [detectConf, detectIou, detectImgsz, trackAssocIou, trackAssocCenterPx, detectClasses])
 
   useEffect(() => {
     latestDetectionRef.current = { legacy: null, hungarian: null }
@@ -573,6 +576,9 @@ export function FocusStreamFrames({
               track_assoc_iou_threshold: String(tun.trackAssocIou),
               track_assoc_center_max_px: String(tun.trackAssocCenterPx),
               enhanced_preview: '1',
+            }
+            if (String(tun.detectClasses || '').trim()) {
+              baseParams.classes = String(tun.detectClasses).trim()
             }
             const lanesJSON = Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0
               ? JSON.stringify(normalizedLocalGeometry.lanes)

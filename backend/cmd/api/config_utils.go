@@ -29,6 +29,21 @@ func boundedIntQuery(r *http.Request, key string, fallback, minValue, maxValue i
 	return v
 }
 
+func boolQuery(r *http.Request, key string, fallback bool) bool {
+	raw := strings.TrimSpace(strings.ToLower(r.URL.Query().Get(key)))
+	if raw == "" {
+		return fallback
+	}
+	switch raw {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
 func corridorForRoadway(roadway string) string {
 	for _, c := range targetCorridors {
 		if strings.Contains(roadway, c) {

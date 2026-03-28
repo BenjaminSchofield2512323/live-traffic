@@ -80,12 +80,16 @@ function App() {
   const [stopping, setStopping] = useState(false)
   const [focusFPS, setFocusFPS] = useState(30)
   const [detectorFPS, setDetectorFPS] = useState(5)
+  const [includeEarthCam, setIncludeEarthCam] = useState(false)
+  const [streamPage, setStreamPage] = useState(1)
+  const streamsPerPage = 5
   /** Per-request detector query tuning (passed to /focus/detect → sidecar). */
   const [detectConf, setDetectConf] = useState(0.25)
   const [detectIou, setDetectIou] = useState(0.45)
   const [detectImgsz, setDetectImgsz] = useState(640)
   const [trackAssocIou, setTrackAssocIou] = useState(0.25)
   const [trackAssocCenterPx, setTrackAssocCenterPx] = useState(96)
+  const [detectTargetClasses, setDetectTargetClasses] = useState('car,truck,bus,motorcycle')
   /** Detector-side metrics from YOLO sidecar via backend focus proxy. */
   const [detectorMetrics, setDetectorMetrics] = useState(null)
   /** Per-camera geometry authored in the focus view and cached in browser storage. */
@@ -211,7 +215,7 @@ function App() {
     setError('')
     try {
       const [camsResp, planResp, alertsResp, statusResp, viewsResp] = await Promise.all([
-        fetch(`${apiBase}/api/v1/cameras/recommended?count=10`),
+        fetch(`${apiBase}/api/v1/cameras/recommended?count=10&include_earthcam=${includeEarthCam ? '1' : '0'}`),
         fetch(`${apiBase}/api/v1/analysis/plan`),
         fetch(`${apiBase}/api/v1/alerts?limit=100`),
         fetch(`${apiBase}/api/v1/pipeline/status`),
@@ -304,7 +308,7 @@ function App() {
 
   useEffect(() => {
     loadDashboard()
-  }, [])
+  }, [includeEarthCam])
 
   useEffect(() => {
     saveLaneGeometryToStorage(laneGeometryByCamera)
@@ -337,12 +341,27 @@ function App() {
     [cameraViews, focusCameraID],
   )
 
+  const pagedStreamViews = useMemo(() => {
+    if (!Array.isArray(cameraViews) || cameraViews.length === 0) return []
+    const start = (streamPage - 1) * streamsPerPage
+    return cameraViews.slice(start, start + streamsPerPage)
+  }, [cameraViews, streamPage])
+
+  const totalStreamPages = useMemo(
+    () => Math.max(1, Math.ceil((cameraViews?.length || 0) / streamsPerPage)),
+    [cameraViews],
+  )
+
   useEffect(() => {
     setDetectorMetrics(null)
     setLaneFlowStats({ totalPerMin: 0, perLane: {} })
     setTrackedEntities([])
     setLaneEditMode(false)
   }, [focusCameraID, focusedView?.stream_url])
+
+  useEffect(() => {
+    if (streamPage > totalStreamPages) setStreamPage(totalStreamPages)
+  }, [streamPage, totalStreamPages])
 
   const currentCameraGeometry = useMemo(() => {
     if (!focusCameraID) return null
@@ -540,6 +559,14 @@ function App() {
               />
             </label>
             <label className="focusControl focusControlInline">
+              Include EarthCam
+              <input
+                type="checkbox"
+                checked={includeEarthCam}
+                onChange={(e) => setIncludeEarthCam(Boolean(e.target.checked))}
+              />
+            </label>
+            <label className="focusControl focusControlInline">
               Lane edit
               <button
                 type="button"
@@ -619,6 +646,15 @@ function App() {
                 onChange={(e) => setTrackAssocCenterPx(Number(e.target.value))}
               />
             </label>
+            <label className="focusControl focusSlider">
+              <span className="focusSliderLabel">Classes (CSV)</span>
+              <input
+                type="text"
+                value={detectTargetClasses}
+                onChange={(e) => setDetectTargetClasses(e.target.value)}
+                placeholder="car,truck,bus,motorcycle,person"
+              />
+            </label>
             <button
               type="button"
               className="btn btnSecondary focusTuningReset"
@@ -628,6 +664,7 @@ function App() {
                 setDetectImgsz(640)
                 setTrackAssocIou(0.25)
                 setTrackAssocCenterPx(96)
+                setDetectTargetClasses('car,truck,bus,motorcycle')
               }}
             >
               Reset tuning
@@ -652,6 +689,7 @@ function App() {
                 detectImgsz={detectImgsz}
                 trackAssocIou={trackAssocIou}
                 trackAssocCenterPx={trackAssocCenterPx}
+                detectTargetClasses={detectTargetClasses}
                 cameraID={focusCameraID}
                 apiBase={apiBase}
                 localLaneGeometry={currentCameraGeometry}
@@ -804,6 +842,49 @@ function App() {
         ) : (
           <p>Start the pipeline to see live processing for a selected feed.</p>
         )}
+      </section>
+
+      <section className="focusPanel" aria-labelledby="live-streams-heading">
+        <div className="focusPanelHeader">
+          <h2 id="live-streams-heading">Live streams</h2>
+          <p className="focusPanelLead">
+            Showing {pagedStreamViews.length} of {cameraViews.length} active streams (page {streamPage}/{totalStreamPages}).
+          </p>
+        </div>
+        <div className="focusGrid focusGridLive">
+          {pagedStreamViews.map((v) => (
+            <article key={`stream-${v.camera_id}`} className="focusCard focusCardLive">
+              <h3>{v.roadway || `Camera ${v.camera_id}`}</h3>
+              <p className="focusLaneMeta">{v.location}</p>
+              {v.stream_url ? (
+                <a className="focusStreamLink" href={v.stream_url} target="_blank" rel="noreferrer">
+                  Open live stream
+                </a>
+              ) : (
+                <p className="focusPlaceholder">No stream URL available</p>
+              )}
+            </article>
+          ))}
+          {pagedStreamViews.length === 0 && <p className="focusPlaceholder">No live streams loaded.</p>}
+        </div>
+        <div className="focusLaneEditorActions">
+          <button
+            type="button"
+            className="btn btnSecondary"
+            onClick={() => setStreamPage((p) => Math.max(1, p - 1))}
+            disabled={streamPage <= 1}
+          >
+            Prev
+          </button>
+          <button
+            type="button"
+            className="btn btnSecondary"
+            onClick={() => setStreamPage((p) => Math.min(totalStreamPages, p + 1))}
+            disabled={streamPage >= totalStreamPages}
+          >
+            Next
+          </button>
+        </div>
       </section>
 
       {loading && <p>Loading camera recommendations...</p>}

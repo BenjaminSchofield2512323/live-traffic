@@ -21,7 +21,12 @@ try:
 except Exception:  # pragma: no cover - optional runtime fallback.
     lapjv = None
 
-TARGET_CLASSES = {"car", "truck", "bus", "motorcycle"}
+_default_target_classes = ["car", "truck", "bus", "motorcycle"]
+_raw_target_classes = os.getenv("DETECTOR_TARGET_CLASSES", "").strip()
+if _raw_target_classes:
+    TARGET_CLASSES = {c.strip().lower() for c in _raw_target_classes.split(",") if c.strip()}
+else:
+    TARGET_CLASSES = set(_default_target_classes)
 LOGGER = logging.getLogger("detector_spike")
 
 
