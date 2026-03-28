@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Hls from 'hls.js'
 import { deriveMetrics, drawProcessedOverlay, imageDataToGray } from './focusFrameMetrics.js'
 
@@ -18,6 +18,19 @@ function normalizeDetectorPayload(p) {
       ? p.detections
       : []
   return { image, detections }
+}
+
+function trackNumberToLabel(trackID) {
+  const n = Number(trackID)
+  if (!Number.isFinite(n) || n < 1) return String(trackID ?? '?')
+  let x = Math.floor(n)
+  let label = ''
+  while (x > 0) {
+    const rem = (x - 1) % 26
+    label = String.fromCharCode(65 + rem) + label
+    x = Math.floor((x - 1) / 26)
+  }
+  return label || String(trackID)
 }
 
 function drawLanePolygons(ctx, payload, dw, dh) {
@@ -66,6 +79,44 @@ function drawLanePolygons(ctx, payload, dw, dh) {
   ctx.restore()
 }
 
+function normalizeLocalLaneGeometry(localLaneGeometry) {
+  if (!localLaneGeometry || !Array.isArray(localLaneGeometry.lanes)) return null
+  const lanes = localLaneGeometry.lanes
+    .map((lane, idx) => {
+      const laneID = String(lane?.lane_id || lane?.id || `lane_${idx + 1}`).trim()
+      const poly = Array.isArray(lane?.polygon)
+        ? lane.polygon
+            .filter((pt) => Array.isArray(pt) && pt.length >= 2)
+            .map((pt) => [Number(pt[0]), Number(pt[1])])
+        : []
+      if (!laneID || poly.length < 3) return null
+      return { lane_id: laneID, polygon: poly }
+    })
+    .filter(Boolean)
+  if (!lanes.length) return null
+  return { lanes }
+}
+
+function buildRoadPolygonFromLanes(lanes) {
+  const points = []
+  lanes.forEach((lane) => {
+    lane.polygon.forEach((pt) => points.push(pt))
+  })
+  if (points.length < 3) return null
+  const xs = points.map((pt) => Number(pt[0]))
+  const ys = points.map((pt) => Number(pt[1]))
+  const minX = Math.min(...xs)
+  const maxX = Math.max(...xs)
+  const minY = Math.min(...ys)
+  const maxY = Math.max(...ys)
+  return [
+    [minX, minY],
+    [maxX, minY],
+    [maxX, maxY],
+    [minX, maxY],
+  ]
+}
+
 function absolutize511StreamUrl(u) {
   if (!u) return ''
   const s = String(u).trim()
@@ -82,7 +133,9 @@ export function FocusStreamFrames({
   streamUrl,
   fps,
   detectorFPS = 2,
-  lanePolygons = null,
+  localLaneGeometry = null,
+  laneEditMode = false,
+  onLaneGeometryChange,
   cameraID,
   apiBase,
   onFrameMetrics,
@@ -101,8 +154,17 @@ export function FocusStreamFrames({
   const detectInflightRef = useRef(false)
   const lastDetectAtRef = useRef(0)
   const latestDetectionRef = useRef(null)
+  const analysisFrameRef = useRef(null)
+  const latestFrameSizeRef = useRef({ width: 0, height: 0 })
+  const draftPolyRef = useRef([])
+  const [laneEditError, setLaneEditError] = useState('')
   const [streamReady, setStreamReady] = useState(false)
   const [hlsError, setHlsError] = useState(null)
+
+  const normalizedLocalGeometry = useMemo(
+    () => normalizeLocalLaneGeometry(localLaneGeometry),
+    [localLaneGeometry],
+  )
 
   useEffect(() => {
     metricsCbRef.current = onFrameMetrics
@@ -114,10 +176,67 @@ export function FocusStreamFrames({
 
   useEffect(() => {
     latestDetectionRef.current = null
+    analysisFrameRef.current = null
     detectInflightRef.current = false
     lastDetectAtRef.current = 0
     detectionCbRef.current?.(null)
-  }, [streamUrl, cameraID, lanePolygons])
+    draftPolyRef.current = []
+  }, [streamUrl, cameraID, localLaneGeometry])
+
+  const handleCanvasClick = (evt) => {
+    if (!laneEditMode) return
+    const proc = procRef.current
+    if (!proc) return
+    const rect = proc.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return
+    const x = ((evt.clientX - rect.left) / rect.width) * proc.width
+    const y = ((evt.clientY - rect.top) / rect.height) * proc.height
+    const px = Math.max(0, Math.min(proc.width - 1, Math.round(x)))
+    const py = Math.max(0, Math.min(proc.height - 1, Math.round(y)))
+    draftPolyRef.current = [...draftPolyRef.current, [px, py]]
+    setLaneEditError('')
+  }
+
+  const commitDraftLane = () => {
+    if (!laneEditMode) return
+    const draft = draftPolyRef.current
+    if (!draft || draft.length < 3) {
+      setLaneEditError('Need at least 3 points to create a lane.')
+      return
+    }
+    const base = normalizedLocalGeometry?.lanes || []
+    const laneID = `lane_${base.length + 1}`
+    const nextLanes = [...base, { lane_id: laneID, polygon: draft }]
+    const roadPolygon = buildRoadPolygonFromLanes(nextLanes)
+    onLaneGeometryChange?.({
+      lanes: nextLanes,
+      road_polygon: roadPolygon,
+      detector_input_resolution: latestFrameSizeRef.current,
+    })
+    draftPolyRef.current = []
+    setLaneEditError('')
+  }
+
+  const clearDraftLane = () => {
+    draftPolyRef.current = []
+    setLaneEditError('')
+  }
+
+  const removeLastLane = () => {
+    const base = normalizedLocalGeometry?.lanes || []
+    if (!base.length) return
+    const nextLanes = base.slice(0, -1)
+    const roadPolygon = nextLanes.length ? buildRoadPolygonFromLanes(nextLanes) : null
+    onLaneGeometryChange?.(
+      nextLanes.length
+        ? {
+            lanes: nextLanes,
+            road_polygon: roadPolygon,
+            detector_input_resolution: latestFrameSizeRef.current,
+          }
+        : null,
+    )
+  }
 
   useEffect(() => {
     const video = videoRef.current
@@ -212,6 +331,7 @@ export function FocusStreamFrames({
       const scale = Math.min(1, maxW / vw)
       const dw = Math.floor(vw * scale)
       const dh = Math.floor(vh * scale)
+      latestFrameSizeRef.current = { width: dw, height: dh }
 
       raw.width = dw
       raw.height = dh
@@ -224,7 +344,12 @@ export function FocusStreamFrames({
       const procCtx = proc.getContext('2d')
 
       rawCtx.drawImage(video, 0, 0, dw, dh)
-      procCtx.drawImage(video, 0, 0, dw, dh)
+      const frozen = analysisFrameRef.current
+      if (frozen && frozen.width > 0 && frozen.height > 0) {
+        procCtx.drawImage(frozen, 0, 0, dw, dh)
+      } else {
+        procCtx.drawImage(video, 0, 0, dw, dh)
+      }
 
       ctxM.drawImage(video, 0, 0, MW, MH)
       const imgData = ctxM.getImageData(0, 0, MW, MH)
@@ -236,8 +361,58 @@ export function FocusStreamFrames({
       drawProcessedOverlay(procCtx, dw, dh, motion, occupancy)
       const rawPayload = latestDetectionRef.current
       const { image: detImage, detections: detList } = normalizeDetectorPayload(rawPayload)
+      const trackList = Array.isArray(rawPayload?.tracks) ? rawPayload.tracks : []
+      const hasLocalLanes = Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0
       drawLanePolygons(procCtx, rawPayload, dw, dh)
-      if (Array.isArray(detList) && detList.length > 0) {
+      if (laneEditMode) {
+        const localLanes = normalizedLocalGeometry?.lanes || []
+        procCtx.save()
+        procCtx.lineWidth = 2
+        procCtx.strokeStyle = 'rgba(255, 195, 0, 0.95)'
+        procCtx.fillStyle = 'rgba(255, 195, 0, 0.1)'
+        procCtx.font = '12px sans-serif'
+        localLanes.forEach((lane) => {
+          const poly = lane.polygon || []
+          if (poly.length < 3) return
+          procCtx.beginPath()
+          poly.forEach((pt, i) => {
+            const x = Number(pt[0])
+            const y = Number(pt[1])
+            if (i === 0) procCtx.moveTo(x, y)
+            else procCtx.lineTo(x, y)
+          })
+          procCtx.closePath()
+          procCtx.fill()
+          procCtx.stroke()
+          const cx = poly.reduce((acc, pt) => acc + Number(pt[0]), 0) / poly.length
+          const cy = poly.reduce((acc, pt) => acc + Number(pt[1]), 0) / poly.length
+          procCtx.fillStyle = 'rgba(255, 195, 0, 0.95)'
+          procCtx.fillText(String(lane.lane_id), cx + 2, cy - 2)
+          procCtx.fillStyle = 'rgba(255, 195, 0, 0.1)'
+        })
+
+        const draft = draftPolyRef.current
+        if (draft.length > 0) {
+          procCtx.strokeStyle = 'rgba(255, 90, 90, 0.95)'
+          procCtx.fillStyle = 'rgba(255, 90, 90, 0.18)'
+          procCtx.beginPath()
+          draft.forEach((pt, i) => {
+            const x = Number(pt[0])
+            const y = Number(pt[1])
+            if (i === 0) procCtx.moveTo(x, y)
+            else procCtx.lineTo(x, y)
+            procCtx.fillRect(x - 2, y - 2, 4, 4)
+          })
+          if (draft.length >= 3) {
+            procCtx.closePath()
+            procCtx.fill()
+          }
+          procCtx.stroke()
+        }
+        procCtx.restore()
+      }
+      const overlayItems = trackList.length > 0 ? trackList : detList
+      if (Array.isArray(overlayItems) && overlayItems.length > 0) {
         const detW = Number(detImage?.width || 0) || dw
         const detH = Number(detImage?.height || 0) || dh
         const sx = detW > 0 ? dw / detW : 1
@@ -247,15 +422,19 @@ export function FocusStreamFrames({
         procCtx.strokeStyle = 'rgba(45,210,80,0.95)'
         procCtx.font = '12px sans-serif'
         procCtx.fillStyle = 'rgba(45,210,80,0.95)'
-        detList.forEach((d) => {
+        overlayItems.forEach((d) => {
           if (!Array.isArray(d.bbox) || d.bbox.length < 4) return
+          const laneID = d.lane_id
+          const inROI = Boolean(d.in_roi ?? (laneID != null && laneID !== ''))
+          // When user-authored lanes exist, only draw lane-assigned vehicles.
+          if (hasLocalLanes && !inROI) return
           const [x1, y1, x2, y2] = d.bbox
           const bx = x1 * sx
           const by = y1 * sy
           const bw = Math.max(1, (x2 - x1) * sx)
           const bh = Math.max(1, (y2 - y1) * sy)
           procCtx.strokeRect(bx, by, bw, bh)
-          const tag = `${d.class_name || 'obj'} ${(Number(d.confidence || 0) * 100).toFixed(0)}%`
+          const tag = trackNumberToLabel(d.track_id)
           procCtx.fillText(tag, bx + 2, Math.max(12, by - 3))
         })
       }
@@ -268,7 +447,17 @@ export function FocusStreamFrames({
       if (shouldDetect) {
         detectInflightRef.current = true
         lastDetectAtRef.current = now
-        raw.toBlob(async (blob) => {
+        const analysisCanvas = document.createElement('canvas')
+        analysisCanvas.width = dw
+        analysisCanvas.height = dh
+        const analysisCtx = analysisCanvas.getContext('2d')
+        if (!analysisCtx) {
+          detectInflightRef.current = false
+          rafRef.current = requestAnimationFrame(tick)
+          return
+        }
+        analysisCtx.drawImage(video, 0, 0, dw, dh)
+        analysisCanvas.toBlob(async (blob) => {
           if (!blob) {
             detectInflightRef.current = false
             return
@@ -281,8 +470,8 @@ export function FocusStreamFrames({
               imgsz: '640',
               conf: '0.25',
             })
-            if (Array.isArray(lanePolygons) && lanePolygons.length > 0) {
-              params.set('lanes', JSON.stringify(lanePolygons))
+            if (Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0) {
+              params.set('lanes', JSON.stringify(normalizedLocalGeometry.lanes))
             }
             const url = `${apiBase}/api/v1/pipeline/focus/detect?${params.toString()}`
             const resp = await fetch(url, {
@@ -294,6 +483,7 @@ export function FocusStreamFrames({
               throw new Error(`detect failed (${resp.status})`)
             }
             const payload = await resp.json()
+            analysisFrameRef.current = analysisCanvas
             latestDetectionRef.current = payload
             detectionCbRef.current?.(payload)
           } catch {
@@ -313,7 +503,7 @@ export function FocusStreamFrames({
       cancelAnimationFrame(rafRef.current)
       prevGrayRef.current = null
     }
-  }, [fps, detectorFPS, streamUrl, cameraID, apiBase, lanePolygons])
+  }, [fps, detectorFPS, streamUrl, cameraID, apiBase, normalizedLocalGeometry, laneEditMode])
 
   return (
     <div className="focusStreamFrames">
@@ -328,6 +518,25 @@ export function FocusStreamFrames({
       <canvas ref={metricsCanvasRef} className="focusMetricsCanvas" aria-hidden />
       {hlsError && <p className="focusHlsError">{hlsError}</p>}
       {!streamReady && !hlsError && <p className="focusPlaceholder">Connecting to stream…</p>}
+      {laneEditMode && (
+        <div className="laneEditorPanel">
+          <div className="laneEditorButtons">
+            <button type="button" onClick={commitDraftLane}>
+              Add lane from points
+            </button>
+            <button type="button" onClick={clearDraftLane}>
+              Clear draft
+            </button>
+            <button type="button" onClick={removeLastLane}>
+              Remove last lane
+            </button>
+          </div>
+          <p className="laneEditorHint">
+            Click the processed canvas to place polygon points, then add lane. Local-only for now.
+          </p>
+          {laneEditError && <p className="focusHlsError">{laneEditError}</p>}
+        </div>
+      )}
       <div className="focusGrid focusGridLive">
         <div className="focusCard focusCardLive">
           <h3>Raw (stream)</h3>
@@ -335,7 +544,11 @@ export function FocusStreamFrames({
         </div>
         <div className="focusCard focusCardLive focusCardLiveProcessed">
           <h3>Processed (YOLO)</h3>
-          <canvas ref={procRef} className="focusFrameCanvas focusFrameCanvasProcessed" />
+          <canvas
+            ref={procRef}
+            className="focusFrameCanvas focusFrameCanvasProcessed"
+            onClick={handleCanvasClick}
+          />
         </div>
       </div>
     </div>

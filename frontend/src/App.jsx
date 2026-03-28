@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { FocusStreamFrames } from './FocusStreamFrames.jsx'
 
@@ -9,6 +9,44 @@ const apiBase =
   import.meta.env.DEV && import.meta.env.VITE_DEV_DIRECT_API !== '1'
     ? ''
     : import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
+const focusRefreshIntervalMs = 2000
+const laneStorageKey = 'focus-lane-polygons-v1'
+const laneFlowWindowSec = 60
+
+function trackNumberToLabel(trackID) {
+  const n = Number(trackID)
+  if (!Number.isFinite(n) || n < 1) return String(trackID ?? '?')
+  let x = Math.floor(n)
+  let label = ''
+  while (x > 0) {
+    const rem = (x - 1) % 26
+    label = String.fromCharCode(65 + rem) + label
+    x = Math.floor((x - 1) / 26)
+  }
+  return label || String(trackID)
+}
+
+function loadLaneGeometryFromStorage() {
+  try {
+    if (typeof window === 'undefined') return {}
+    const raw = window.localStorage.getItem(laneStorageKey)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    return parsed
+  } catch {
+    return {}
+  }
+}
+
+function saveLaneGeometryToStorage(payload) {
+  try {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(laneStorageKey, JSON.stringify(payload))
+  } catch {
+    // Browser storage can be unavailable (private mode/quota). Keep app usable.
+  }
+}
 function buildImageURL(path) {
   if (!path) return ''
   if (path.startsWith('http://') || path.startsWith('https://')) return path
@@ -42,22 +80,94 @@ function App() {
   const [stopping, setStopping] = useState(false)
   const [focusFPS, setFocusFPS] = useState(30)
   const [detectorFPS, setDetectorFPS] = useState(5)
-  /** Motion/occupancy from client-side frame diff on the HLS decode (same heuristics as API). */
-  const [streamClientMetrics, setStreamClientMetrics] = useState(null)
   /** Detector-side metrics from YOLO sidecar via backend focus proxy. */
   const [detectorMetrics, setDetectorMetrics] = useState(null)
-
-  const onStreamFrameMetrics = useCallback((m) => {
-    setStreamClientMetrics(m)
-  }, [])
+  /** Per-camera geometry authored in the focus view and cached in browser storage. */
+  const [laneGeometryByCamera, setLaneGeometryByCamera] = useState(() => loadLaneGeometryFromStorage())
+  const [laneEditMode, setLaneEditMode] = useState(false)
+  const [laneFlowStats, setLaneFlowStats] = useState({ totalPerMin: 0, perLane: {} })
+  const [trackedEntities, setTrackedEntities] = useState([])
+  const flowStateRef = useRef({})
 
   /** Focus canvas POSTs to /focus/detect; sync metrics cards + lane counts from the same payload the overlay uses. */
   const onDetectionMetrics = useCallback((payload) => {
     setDetectorMetrics(payload)
-    if (!payload) return
+    if (!payload) {
+      setTrackedEntities([])
+      return
+    }
     const metrics = payload.metrics || {}
     const detections = Array.isArray(payload.detections) ? payload.detections : []
     const tracks = Array.isArray(payload.tracks) ? payload.tracks : []
+    const localLanes =
+      focusCameraID && laneGeometryByCamera[String(focusCameraID)]?.lanes
+        ? laneGeometryByCamera[String(focusCameraID)].lanes
+        : []
+    const localLaneIDs = new Set(
+      localLanes
+        .map((lane) => String(lane?.lane_id || lane?.id || '').trim())
+        .filter(Boolean),
+    )
+    const streamID = String(payload.stream_id || '')
+    const streamKey = streamID || 'default'
+    const nowMs = Number(payload.ts_unix_ms ?? Date.now())
+
+    const flowState = flowStateRef.current[streamKey] || {
+      seen: {},
+      events: [],
+    }
+    for (const t of tracks) {
+      const laneID = t?.lane_id
+      const trackID = t?.track_id
+      if (!laneID || trackID == null) continue
+      if (localLaneIDs.size > 0 && !localLaneIDs.has(String(laneID))) continue
+      const key = `${trackID}:${laneID}`
+      if (!flowState.seen[key]) {
+        flowState.seen[key] = nowMs
+        flowState.events.push({ ts: nowMs, lane_id: String(laneID) })
+      }
+    }
+    const cutoffMs = nowMs - laneFlowWindowSec * 1000
+    flowState.events = flowState.events.filter((e) => e.ts >= cutoffMs)
+    const pruneSeenBefore = nowMs - 10 * 60 * 1000
+    Object.keys(flowState.seen).forEach((k) => {
+      if (flowState.seen[k] < pruneSeenBefore) delete flowState.seen[k]
+    })
+    flowStateRef.current[streamKey] = flowState
+
+    const perLane = {}
+    if (localLaneIDs.size > 0) {
+      for (const e of flowState.events) {
+        if (localLaneIDs.has(e.lane_id)) {
+          perLane[e.lane_id] = (perLane[e.lane_id] || 0) + 1
+        }
+      }
+    }
+    const totalPerMin = localLaneIDs.size > 0
+      ? Object.values(perLane).reduce((acc, n) => acc + Number(n || 0), 0)
+      : 0
+    setLaneFlowStats({ totalPerMin, perLane })
+
+    const entities = tracks
+      .filter((t) => t?.track_id != null)
+      .map((t) => {
+        const detMatch = detections.find((d) => Number(d.track_id) === Number(t.track_id))
+        const cls = String(detMatch?.class_name || t.class_name || 'unknown')
+        const confidence = Number(detMatch?.confidence ?? t.confidence ?? 0)
+        const speedPxS = Number(t.speed_px_s ?? 0)
+        return {
+          track_id: Number(t.track_id),
+          overlay_id: trackNumberToLabel(t.track_id),
+          class_name: cls,
+          lane_id: t.lane_id ?? null,
+          speed_px_s: speedPxS,
+          confidence,
+          is_moving: speedPxS >= 12.0,
+        }
+      })
+      .sort((a, b) => a.overlay_id.localeCompare(b.overlay_id))
+    setTrackedEntities(entities)
+
     setDetectStatus((prev) => ({
       ...prev,
       phase: 'ready',
@@ -75,7 +185,7 @@ function App() {
         metrics.mean_smoothed_speed_px_s ?? metrics.mean_track_speed_px_s ?? 0,
       ),
     }))
-  }, [])
+  }, [focusCameraID, laneGeometryByCamera])
 
   const totalFeeds = useMemo(() => recommended.length, [recommended])
   const totalAlerts = useMemo(() => alerts.length, [alerts])
@@ -191,6 +301,10 @@ function App() {
   }, [])
 
   useEffect(() => {
+    saveLaneGeometryToStorage(laneGeometryByCamera)
+  }, [laneGeometryByCamera])
+
+  useEffect(() => {
     const id = setInterval(() => {
       Promise.all([
         fetch(`${apiBase}/api/v1/alerts?limit=100`)
@@ -218,9 +332,47 @@ function App() {
   )
 
   useEffect(() => {
-    setStreamClientMetrics(null)
     setDetectorMetrics(null)
+    setLaneFlowStats({ totalPerMin: 0, perLane: {} })
+    setTrackedEntities([])
+    setLaneEditMode(false)
   }, [focusCameraID, focusedView?.stream_url])
+
+  const currentCameraGeometry = useMemo(() => {
+    if (!focusCameraID) return null
+    return laneGeometryByCamera[String(focusCameraID)] || null
+  }, [focusCameraID, laneGeometryByCamera])
+
+  const handleLaneGeometryChange = useCallback(
+    (geometry) => {
+      if (!focusCameraID) return
+      const key = String(focusCameraID)
+      setLaneGeometryByCamera((prev) => {
+        const next = { ...prev }
+        if (!geometry || !Array.isArray(geometry.lanes) || geometry.lanes.length === 0) {
+          delete next[key]
+          return next
+        }
+        next[key] = {
+          ...geometry,
+          camera_id: focusCameraID,
+          updated_at: Date.now(),
+        }
+        return next
+      })
+    },
+    [focusCameraID],
+  )
+
+  const clearCurrentCameraGeometry = useCallback(() => {
+    if (!focusCameraID) return
+    const key = String(focusCameraID)
+    setLaneGeometryByCamera((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }, [focusCameraID])
 
   return (
     <main className="app">
@@ -381,6 +533,16 @@ function App() {
                 }
               />
             </label>
+            <label className="focusControl focusControlInline">
+              Lane edit
+              <button
+                type="button"
+                className="btn btnSecondary"
+                onClick={() => setLaneEditMode((v) => !v)}
+              >
+                {laneEditMode ? 'Stop editing' : 'Draw lane polygons'}
+              </button>
+            </label>
           </div>
         )}
         {detectStatus.lastError && <p className="warn">Detector: {detectStatus.lastError}</p>}
@@ -398,7 +560,9 @@ function App() {
                 detectorFPS={detectorFPS}
                 cameraID={focusCameraID}
                 apiBase={apiBase}
-                onFrameMetrics={onStreamFrameMetrics}
+                localLaneGeometry={currentCameraGeometry}
+                laneEditMode={laneEditMode}
+                onLaneGeometryChange={handleLaneGeometryChange}
                 onDetectionMetrics={onDetectionMetrics}
               />
             ) : (
@@ -419,67 +583,68 @@ function App() {
               </dl>
               <div className="focusMetricsStrip">
                 <div className="focusMetricPill">
-                  <span className="focusMetricLabel">Pipeline motion</span>
-                  <span className="focusMetricValue">{focusedView.motion?.toFixed(4) ?? '—'}</span>
+                  <span className="focusMetricLabel">Vehicles</span>
+                  <span className="focusMetricValue">{detectorMetrics?.metrics?.vehicle_count ?? 0}</span>
                 </div>
                 <div className="focusMetricPill">
-                  <span className="focusMetricLabel">Pipeline occ.</span>
-                  <span className="focusMetricValue">{focusedView.occupancy?.toFixed(4) ?? '—'}</span>
+                  <span className="focusMetricLabel">Moving ratio</span>
+                  <span className="focusMetricValue">
+                    {(((detectorMetrics?.metrics?.moving_ratio ?? 0) * 100)).toFixed(0)}%
+                  </span>
                 </div>
                 <div className="focusMetricPill">
-                  <span className="focusMetricLabel">Failures</span>
-                  <span className="focusMetricValue">{focusedView.failures ?? 0}</span>
+                  <span className="focusMetricLabel">Occupancy (YOLO)</span>
+                  <span className="focusMetricValue">
+                    {(detectorMetrics?.metrics?.occupancy_ratio ?? 0).toFixed(3)}
+                  </span>
                 </div>
-                {streamClientMetrics && (
-                  <>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">Stream motion</span>
-                      <span className="focusMetricValue">{streamClientMetrics.motion.toFixed(4)}</span>
-                    </div>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">Stream occ.</span>
-                      <span className="focusMetricValue">{streamClientMetrics.occupancy.toFixed(4)}</span>
-                    </div>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">Canvas FPS</span>
-                      <span className="focusMetricValue">{focusFPS}</span>
-                    </div>
-                  </>
-                )}
-                {detectorMetrics?.metrics && (
-                  <>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">YOLO vehicles</span>
-                      <span className="focusMetricValue">{detectorMetrics.metrics.vehicle_count ?? 0}</span>
-                    </div>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">Moving</span>
-                      <span className="focusMetricValue">{detectorMetrics.metrics.moving_vehicle_count ?? 0}</span>
-                    </div>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">YOLO occ.</span>
-                      <span className="focusMetricValue">
-                        {(detectorMetrics.metrics.occupancy_ratio ?? 0).toFixed(3)}
-                      </span>
-                    </div>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">Infer</span>
-                      <span className="focusMetricValue">{Number(detectorMetrics.inference_ms ?? 0).toFixed(0)} ms</span>
-                    </div>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">YOLO FPS cap</span>
-                      <span className="focusMetricValue">{detectorFPS}</span>
-                    </div>
-                    <div className="focusMetricPill">
-                      <span className="focusMetricLabel">Lane polygons</span>
-                      <span className="focusMetricValue">
-                        {Array.isArray(detectorMetrics.geometry?.lanes)
-                          ? detectorMetrics.geometry.lanes.length
-                          : 0}
-                      </span>
-                    </div>
-                  </>
-                )}
+                <div className="focusMetricPill">
+                  <span className="focusMetricLabel">Speed</span>
+                  <span className="focusMetricValue">
+                    {Number(
+                      detectorMetrics?.metrics?.mean_smoothed_speed_px_s ??
+                      detectorMetrics?.metrics?.mean_track_speed_px_s ??
+                      0,
+                    ).toFixed(1)} px/s
+                  </span>
+                </div>
+                <div className="focusMetricPill">
+                  <span className="focusMetricLabel">Flow (last 60s)</span>
+                  <span className="focusMetricValue">{laneFlowStats.totalPerMin}/min</span>
+                </div>
+                <div className="focusMetricPill">
+                  <span className="focusMetricLabel">Lanes drawn</span>
+                  <span className="focusMetricValue">{currentCameraGeometry?.lanes?.length ?? 0}</span>
+                </div>
+                <div className="focusMetricPill">
+                  <span className="focusMetricLabel">Inference</span>
+                  <span className="focusMetricValue">{Number(detectorMetrics?.inference_ms ?? 0).toFixed(0)} ms</span>
+                </div>
+                <div className="focusMetricPill">
+                  <span className="focusMetricLabel">YOLO FPS cap</span>
+                  <span className="focusMetricValue">{detectorFPS}</span>
+                </div>
+                <div className="focusMetricPill">
+                  <span className="focusMetricLabel">Queue / stopped</span>
+                  <span className="focusMetricValue">
+                    {(detectorMetrics?.metrics?.queue_like ?? false) ? 'q' : '-'}
+                    {' / '}
+                    {(detectorMetrics?.metrics?.stopped_like ?? false) ? 's' : '-'}
+                  </span>
+                </div>
+              </div>
+              <div className="focusLaneEditorActions">
+                <p className="focusLaneMeta">
+                  {laneEditMode
+                    ? 'Lane edit mode is ON: click processed canvas to place points, then add lane.'
+                    : 'Lane edit mode is OFF.'}
+                </p>
+                <button type="button" className="btn btnSecondary" onClick={clearCurrentCameraGeometry}>
+                  Clear lane polygons (this camera)
+                </button>
+                <p className="focusLaneMeta">
+                  Polygons are saved locally in your browser for this camera.
+                </p>
               </div>
               {detectorMetrics?.metrics?.counts_per_lane &&
                 Object.keys(detectorMetrics.metrics.counts_per_lane).length > 0 && (
@@ -490,6 +655,43 @@ function App() {
                       .join(' | ')}
                   </p>
                 )}
+              {Object.keys(laneFlowStats.perLane).length > 0 && (
+                <p className="focusLaneMeta">
+                  <strong>Lane flow (last 60s):</strong>{' '}
+                  {Object.entries(laneFlowStats.perLane)
+                    .map(([laneID, count]) => `${laneID}:${count}/min`)
+                    .join(' | ')}
+                </p>
+              )}
+              {trackedEntities.length > 0 && (
+                <div className="focusEntityTableWrap">
+                  <h4>Tracked entities</h4>
+                  <table className="focusEntityTable">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Type</th>
+                        <th>Lane</th>
+                        <th>Moving</th>
+                        <th>Speed</th>
+                        <th>Conf.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trackedEntities.map((ent) => (
+                        <tr key={`${ent.overlay_id}-${ent.track_id}`}>
+                          <td>{ent.overlay_id}</td>
+                          <td>{ent.class_name}</td>
+                          <td>{ent.lane_id ?? '-'}</td>
+                          <td>{ent.is_moving ? 'yes' : 'no'}</td>
+                          <td>{Number(ent.speed_px_s ?? 0).toFixed(1)}</td>
+                          <td>{Number(ent.confidence ?? 0).toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
               {focusedView.stream_url && (
                 <a className="focusStreamLink" href={focusedView.stream_url} target="_blank" rel="noreferrer">
                   Open stream in new tab

@@ -195,3 +195,12 @@ Use CPU first, then promote inference workers to GPU only if p95 latency or accu
 2. Persist alerts/metrics in Postgres and artifacts in S3 (instead of local disk).
 3. Add deduplication windows, suppression rules, and operator feedback loop.
 4. Add auth, tenant routing, and signed webhook delivery.
+
+---
+
+## Lane geometry calibration (phase 1)
+
+Lane metrics now use per-camera geometry config as source-of-truth (instead of ad-hoc lane shapes).
+
+- Schema + ops docs: `docs/LANE_GEOMETRY_CALIBRATION.md`
+- Detector config example: `detector_spike/config/lane_geometry.v1.json`

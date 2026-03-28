@@ -65,28 +65,26 @@ Common query params:
 - `smoothing_window_sec`
 - `debug_overlay=true|false`
 
-## ROI/lane configuration per camera
+## Lane geometry configuration (versioned, per camera)
 
-Use `DETECTOR_ROI_CONFIG_PATH` to load a JSON config:
+Use `DETECTOR_ROI_CONFIG_PATH` to point to a versioned config file:
 
-```json
-{
-  "default": {
-    "road_polygon": [[0, 200], [1280, 200], [1280, 720], [0, 720]],
-    "direction": [1, 0],
-    "lanes": [
-      {"id": "lane_1", "polygon": [[0, 200], [420, 200], [420, 720], [0, 720]]},
-      {"id": "lane_2", "polygon": [[420, 200], [860, 200], [860, 720], [420, 720]]},
-      {"id": "lane_3", "polygon": [[860, 200], [1280, 200], [1280, 720], [860, 720]]}
-    ]
-  },
-  "cam-57": {
-    "direction": [0.97, 0.24]
-  }
-}
-```
+- example committed file: `detector_spike/config/lane_geometry.v1.json`
+- top-level shape:
+  - `schema_version` (must be `lane-geometry-v1`)
+  - `detector_input_resolution`: object `{ "width": <int>, "height": <int> }` for authored lane coordinates
+  - `streams`: map keyed by `stream_id` (e.g. `cam-49`)
 
-`stream_id` is used as the key (`cam-57`, etc). If missing, `default` is used.
+`stream_id` is the source-of-truth key for geometry lookup. Lane assignment is based on
+bottom-center point-in-polygon against configured lane polygons.
+
+Important:
+
+- Coordinates are interpreted in **detector input pixel space after decode** (currently raw image shape in `/internal/detect`).
+- For phase 1, if config is missing/invalid for a stream, the service fails closed for lane assignment:
+  - `lane_id = null`
+  - no lane counts
+  - no crash
 
 ## Environment knobs
 
@@ -101,7 +99,7 @@ Use `DETECTOR_ROI_CONFIG_PATH` to load a JSON config:
 - `DETECTOR_QUEUE_SPEED_THRESHOLD_PX_S` (default `8.0`)
 - `DETECTOR_QUEUE_OCCUPANCY_THRESHOLD` (default `0.18`)
 - `DETECTOR_QUEUE_MIN_TRACKS` (default `4`)
-- `DETECTOR_ROI_CONFIG_PATH` (optional path to ROI/lane JSON)
+- `DETECTOR_ROI_CONFIG_PATH` (optional path to versioned lane geometry JSON)
 - `DETECTOR_DEBUG_OVERLAY_DEFAULT` (`false` by default)
 
 ## Response contract highlights
@@ -120,6 +118,18 @@ For each request:
   - `counts_per_lane`, `counts_per_roi`
   - `mean_smoothed_speed_px_s`, `median_smoothed_speed_px_s`
   - `queue_like`, `stopped_like`
+- `lane_assignment_status`: `ok|missing|invalid|disabled`
+- `lane_assignment_detail`: short reason when status is not `ok`
+
+## Validation workflow (calibrated stream)
+
+1. Add or update one `streams.<stream_id>` entry in config.
+2. Restart detector service.
+3. Call `/internal/detect` repeatedly on the stream.
+4. Check:
+   - same physical lane keeps same `lane_id` under normal bbox jitter
+   - `metrics.counts_per_lane` reflects expected lanes
+   - overlay polygons line up with painted lane boundaries
 
 ## Limitations (v1)
 
