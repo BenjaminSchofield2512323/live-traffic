@@ -30,6 +30,14 @@ else:
 LOGGER = logging.getLogger("detector_spike")
 
 
+def _effective_target_classes(classes_query: str) -> set[str]:
+    """Per-request class filter from ?classes= (comma-separated). Falls back to TARGET_CLASSES if empty."""
+    raw = (classes_query or "").strip()
+    if raw:
+        return {c.strip().lower() for c in raw.split(",") if c.strip()}
+    return set(TARGET_CLASSES)
+
+
 def _env_float(key: str, default: float) -> float:
     raw = os.getenv(key, "").strip()
     if not raw:
@@ -1093,6 +1101,7 @@ async def detect(
     track_assoc_iou_threshold: Optional[float] = Query(default=None, ge=0.05, le=0.95),
     track_assoc_center_max_px: Optional[float] = Query(default=None, ge=0.0, le=400.0),
     track_assoc_hungarian_enabled: Optional[bool] = Query(default=None),
+    classes: str = Query(default=""),
 ) -> dict[str, Any]:
     image_bytes = await request.body()
     if not image_bytes:
@@ -1124,6 +1133,7 @@ async def detect(
     frame_ts_unix_ms = int(now_ts * 1000)
 
     names = results[0].names
+    effective_classes = _effective_target_classes(classes)
     parsed_detections: list[dict[str, Any]] = []
     boxes = results[0].boxes
     if boxes is not None:
@@ -1135,7 +1145,7 @@ async def detect(
         for idx in range(min(len(xyxy_vals), len(cls_vals), len(conf_vals), len(track_ids))):
             cls_id = int(cls_vals[idx])
             class_name = str(names.get(cls_id, cls_id))
-            if class_name not in TARGET_CLASSES:
+            if class_name not in effective_classes:
                 continue
             x1, y1, x2, y2 = [float(v) for v in xyxy_vals[idx]]
             raw_track_id = track_ids[idx]

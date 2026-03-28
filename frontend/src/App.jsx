@@ -15,6 +15,19 @@ const laneFlowWindowSec = 60
 /** Matches backend `external_sources` synthetic id for Herald Square EarthCam. */
 const EARTH_CAM_FOCUS_CAMERA_ID = 900001
 
+/** YOLO/COCO class names passed to the detector ?classes= param. */
+const DETECT_CLASS_OPTIONS = ['car', 'truck', 'bus', 'motorcycle', 'person']
+
+function defaultDetectClassToggles() {
+  return {
+    car: true,
+    truck: true,
+    bus: true,
+    motorcycle: true,
+    person: true,
+  }
+}
+
 function trackNumberToLabel(trackID) {
   const n = Number(trackID)
   if (!Number.isFinite(n) || n < 1) return String(trackID ?? '?')
@@ -87,10 +100,10 @@ function App() {
   /** Per-request detector query tuning (passed to /focus/detect → sidecar). */
   const [detectConf, setDetectConf] = useState(0.25)
   const [detectIou, setDetectIou] = useState(0.45)
-  const [detectImgsz, setDetectImgsz] = useState(640)
+  const [detectImgsz, setDetectImgsz] = useState(960)
   const [trackAssocIou, setTrackAssocIou] = useState(0.25)
   const [trackAssocCenterPx, setTrackAssocCenterPx] = useState(96)
-  const [detectTargetClasses, setDetectTargetClasses] = useState('car,truck,bus,motorcycle')
+  const [detectClassToggles, setDetectClassToggles] = useState(() => defaultDetectClassToggles())
   /** Detector-side metrics from YOLO sidecar via backend focus proxy. */
   const [detectorMetrics, setDetectorMetrics] = useState(null)
   /** Per-camera geometry authored in the focus view and cached in browser storage. */
@@ -381,6 +394,11 @@ function App() {
   const focusedView = useMemo(
     () => focusViewOptions.find((v) => v.camera_id === focusCameraID) || null,
     [focusViewOptions, focusCameraID],
+  )
+
+  const focusDetectClasses = useMemo(
+    () => DETECT_CLASS_OPTIONS.filter((k) => detectClassToggles[k]).join(','),
+    [detectClassToggles],
   )
 
   useEffect(() => {
@@ -683,25 +701,45 @@ function App() {
                 onChange={(e) => setTrackAssocCenterPx(Number(e.target.value))}
               />
             </label>
-            <label className="focusControl focusSlider">
-              <span className="focusSliderLabel">Classes (CSV)</span>
-              <input
-                type="text"
-                value={detectTargetClasses}
-                onChange={(e) => setDetectTargetClasses(e.target.value)}
-                placeholder="car,truck,bus,motorcycle,person"
-              />
-            </label>
+            <div
+              className="focusControl focusClassCheckboxes"
+              role="group"
+              aria-labelledby="focus-detect-classes-label"
+            >
+              <span id="focus-detect-classes-label" className="focusSliderLabel">
+                Classes
+              </span>
+              <div className="focusClassCheckboxRow">
+                {DETECT_CLASS_OPTIONS.map((cls) => (
+                  <label key={cls} className="focusClassCheckboxLabel">
+                    <input
+                      type="checkbox"
+                      checked={!!detectClassToggles[cls]}
+                      onChange={() => {
+                        setDetectClassToggles((prev) => {
+                          const next = { ...prev, [cls]: !prev[cls] }
+                          if (!DETECT_CLASS_OPTIONS.some((k) => next[k])) {
+                            return prev
+                          }
+                          return next
+                        })
+                      }}
+                    />
+                    {cls}
+                  </label>
+                ))}
+              </div>
+            </div>
             <button
               type="button"
               className="btn btnSecondary focusTuningReset"
               onClick={() => {
                 setDetectConf(0.25)
                 setDetectIou(0.45)
-                setDetectImgsz(640)
+                setDetectImgsz(960)
                 setTrackAssocIou(0.25)
                 setTrackAssocCenterPx(96)
-                setDetectTargetClasses('car,truck,bus,motorcycle')
+                setDetectClassToggles(defaultDetectClassToggles())
               }}
             >
               Reset tuning
@@ -728,7 +766,7 @@ function App() {
                 detectImgsz={detectImgsz}
                 trackAssocIou={trackAssocIou}
                 trackAssocCenterPx={trackAssocCenterPx}
-                detectTargetClasses={detectTargetClasses}
+                detectClasses={focusDetectClasses}
                 cameraID={focusCameraID}
                 apiBase={apiBase}
                 earthCamHlsProxy={focusedView.source === 'earthcam'}
