@@ -367,66 +367,33 @@ export function FocusStreamFrames({
   useEffect(() => {
     const video = videoRef.current
     const raw = rawRef.current
-    const proc = procRef.current
+    const procLegacy = procLegacyRef.current
+    const procHungarian = procHungarianRef.current
     const metricsCanvas = metricsCanvasRef.current
-    if (!video || !raw || !proc || !metricsCanvas) return undefined
+    if (!video || !raw || !procLegacy || !procHungarian || !metricsCanvas) return undefined
 
     const ctxM = metricsCanvas.getContext('2d', { willReadFrequently: true })
     const intervalMs = 1000 / Math.max(1, Math.min(30, fps))
     const boundedDetectorFPS = Math.max(1, Math.min(30, Number(detectorFPS) || 2))
     const detectorIntervalMs = 1000 / boundedDetectorFPS
 
-    const tick = (now) => {
-      if (video.readyState < 2 || !video.videoWidth) {
-        rafRef.current = requestAnimationFrame(tick)
-        return
-      }
+    const drawModeCanvas = (canvas, rawPayload, frozenCanvas, dw, dh) => {
+      const procCtx = canvas.getContext('2d')
+      if (!procCtx) return
 
-      if (now - lastFrameRef.current < intervalMs) {
-        rafRef.current = requestAnimationFrame(tick)
-        return
-      }
-      lastFrameRef.current = now
-
-      const vw = video.videoWidth
-      const vh = video.videoHeight
-      const maxW = 640
-      const scale = Math.min(1, maxW / vw)
-      const dw = Math.floor(vw * scale)
-      const dh = Math.floor(vh * scale)
-      latestFrameSizeRef.current = { width: dw, height: dh }
-
-      raw.width = dw
-      raw.height = dh
-      proc.width = dw
-      proc.height = dh
-      metricsCanvas.width = MW
-      metricsCanvas.height = MH
-
-      const rawCtx = raw.getContext('2d')
-      const procCtx = proc.getContext('2d')
-
-      rawCtx.drawImage(video, 0, 0, dw, dh)
-      const frozen = analysisFrameRef.current
-      if (frozen && frozen.width > 0 && frozen.height > 0) {
-        procCtx.drawImage(frozen, 0, 0, dw, dh)
+      if (frozenCanvas && frozenCanvas.width > 0 && frozenCanvas.height > 0) {
+        procCtx.drawImage(frozenCanvas, 0, 0, dw, dh)
       } else {
         procCtx.drawImage(video, 0, 0, dw, dh)
       }
 
-      ctxM.drawImage(video, 0, 0, MW, MH)
-      const imgData = ctxM.getImageData(0, 0, MW, MH)
-      const gray = imageDataToGray(imgData)
-      const prev = prevGrayRef.current
-      const { motion, occupancy } = deriveMetrics(prev, gray, MW, MH)
-      prevGrayRef.current = gray
+      drawProcessedOverlay(procCtx, dw, dh, 0, 0)
 
-      drawProcessedOverlay(procCtx, dw, dh, motion, occupancy)
-      const rawPayload = latestDetectionRef.current
       const { image: detImage, detections: detList } = normalizeDetectorPayload(rawPayload)
       const trackList = Array.isArray(rawPayload?.tracks) ? rawPayload.tracks : []
       const hasLocalLanes = Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0
       drawLanePolygons(procCtx, rawPayload, dw, dh)
+
       if (laneEditMode) {
         const localLanes = normalizedLocalGeometry?.lanes || []
         procCtx.save()
@@ -474,6 +441,7 @@ export function FocusStreamFrames({
         }
         procCtx.restore()
       }
+
       const overlayItems = trackList.length > 0 ? trackList : detList
       if (Array.isArray(overlayItems) && overlayItems.length > 0) {
         const detW = Number(detImage?.width || 0) || dw
@@ -489,7 +457,6 @@ export function FocusStreamFrames({
           if (!Array.isArray(d.bbox) || d.bbox.length < 4) return
           const laneID = d.lane_id
           const inROI = Boolean(d.in_roi ?? (laneID != null && laneID !== ''))
-          // When user-authored lanes exist, only draw lane-assigned vehicles.
           if (hasLocalLanes && !inROI) return
           const [x1, y1, x2, y2] = d.bbox
           const bx = x1 * sx
@@ -501,6 +468,51 @@ export function FocusStreamFrames({
           procCtx.fillText(tag, bx + 2, Math.max(12, by - 3))
         })
       }
+    }
+
+    const tick = (now) => {
+      if (video.readyState < 2 || !video.videoWidth) {
+        rafRef.current = requestAnimationFrame(tick)
+        return
+      }
+
+      if (now - lastFrameRef.current < intervalMs) {
+        rafRef.current = requestAnimationFrame(tick)
+        return
+      }
+      lastFrameRef.current = now
+
+      const vw = video.videoWidth
+      const vh = video.videoHeight
+      const maxW = 640
+      const scale = Math.min(1, maxW / vw)
+      const dw = Math.floor(vw * scale)
+      const dh = Math.floor(vh * scale)
+      latestFrameSizeRef.current = { width: dw, height: dh }
+
+      raw.width = dw
+      raw.height = dh
+      procLegacy.width = dw
+      procLegacy.height = dh
+      procHungarian.width = dw
+      procHungarian.height = dh
+      metricsCanvas.width = MW
+      metricsCanvas.height = MH
+
+      const rawCtx = raw.getContext('2d')
+
+      rawCtx.drawImage(video, 0, 0, dw, dh)
+      ctxM.drawImage(video, 0, 0, MW, MH)
+      const imgData = ctxM.getImageData(0, 0, MW, MH)
+      const gray = imageDataToGray(imgData)
+      const prev = prevGrayRef.current
+      const { motion, occupancy } = deriveMetrics(prev, gray, MW, MH)
+      prevGrayRef.current = gray
+
+      const legacyPayload = latestDetectionRef.current.legacy
+      const hungarianPayload = latestDetectionRef.current.hungarian || legacyPayload
+      drawModeCanvas(procLegacy, legacyPayload, analysisFrameRef.current.legacy, dw, dh)
+      drawModeCanvas(procHungarian, hungarianPayload, analysisFrameRef.current.hungarian, dw, dh)
       metricsCbRef.current?.({ motion, occupancy })
 
       const shouldDetect =
@@ -529,7 +541,7 @@ export function FocusStreamFrames({
             const bytes = await blob.arrayBuffer()
             const tun = detectTuningRef.current
             const imgsz = Math.round(Math.max(160, Math.min(1280, Number(tun.imgsz) || 640)) / 32) * 32
-            const params = new URLSearchParams({
+            const baseParams = {
               camera_id: String(cameraID),
               stream_id: `cam-${cameraID}`,
               imgsz: String(imgsz),
@@ -538,38 +550,38 @@ export function FocusStreamFrames({
               track_assoc_iou_threshold: String(tun.trackAssocIou),
               track_assoc_center_max_px: String(tun.trackAssocCenterPx),
               enhanced_preview: '1',
-            })
-            if (Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0) {
-              params.set('lanes', JSON.stringify(normalizedLocalGeometry.lanes))
             }
-            const url = `${apiBase}/api/v1/pipeline/focus/detect?${params.toString()}`
-            const resp = await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/octet-stream' },
-              body: bytes,
-            })
-            if (!resp.ok) {
-              throw new Error(`detect failed (${resp.status})`)
-            }
-            const payload = await resp.json()
-            analysisFrameRef.current = analysisCanvas
-            const previewB64 = typeof payload?.enhanced_preview_jpeg_b64 === 'string' ? payload.enhanced_preview_jpeg_b64 : ''
-            if (previewB64.length > 0) {
-              const img = new Image()
-              img.onload = () => {
-                const c = document.createElement('canvas')
-                c.width = analysisCanvas.width
-                c.height = analysisCanvas.height
-                const ictx = c.getContext('2d')
-                if (ictx) {
-                  ictx.drawImage(img, 0, 0, c.width, c.height)
-                  analysisFrameRef.current = c
-                }
+            const lanesJSON = Array.isArray(normalizedLocalGeometry?.lanes) && normalizedLocalGeometry.lanes.length > 0
+              ? JSON.stringify(normalizedLocalGeometry.lanes)
+              : ''
+            const runDetect = async (useHungarian) => {
+              const params = new URLSearchParams({
+                ...baseParams,
+                track_assoc_hungarian_enabled: useHungarian ? '1' : '0',
+              })
+              if (lanesJSON) params.set('lanes', lanesJSON)
+              const url = `${apiBase}/api/v1/pipeline/focus/detect?${params.toString()}`
+              const resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: bytes,
+              })
+              if (!resp.ok) {
+                throw new Error(`detect failed (${resp.status})`)
               }
-              img.src = `data:image/jpeg;base64,${previewB64}`
+              return resp.json()
             }
-            latestDetectionRef.current = payload
-            detectionCbRef.current?.(payload)
+            const [legacyPayload, hungarianPayload] = await Promise.all([
+              runDetect(false),
+              runDetect(true),
+            ])
+            analysisFrameRef.current.legacy = analysisCanvas
+            analysisFrameRef.current.hungarian = analysisCanvas
+            latestDetectionRef.current = {
+              legacy: legacyPayload,
+              hungarian: hungarianPayload,
+            }
+            detectionCbRef.current?.(hungarianPayload || legacyPayload)
           } catch {
             // Keep rendering stream even if detector sidecar is unavailable.
           } finally {
@@ -626,12 +638,21 @@ export function FocusStreamFrames({
           <h3>Raw (stream)</h3>
           <canvas ref={rawRef} className="focusFrameCanvas" />
         </div>
-        <div className="focusCard focusCardLive focusCardLiveProcessed">
-          <h3>Processed (YOLO)</h3>
+      </div>
+      <div className="focusCompareRows">
+        <div className="focusCard focusCardLive focusCardLiveProcessed focusCompareCard">
+          <h3>Processed (Legacy/Greedy)</h3>
           <canvas
-            ref={procRef}
+            ref={procLegacyRef}
             className="focusFrameCanvas focusFrameCanvasProcessed"
             onClick={handleCanvasClick}
+          />
+        </div>
+        <div className="focusCard focusCardLive focusCardLiveProcessed focusCompareCard">
+          <h3>Processed (Hungarian)</h3>
+          <canvas
+            ref={procHungarianRef}
+            className="focusFrameCanvas focusFrameCanvasProcessed focusFrameCanvasProcessedHungarian"
           />
         </div>
       </div>

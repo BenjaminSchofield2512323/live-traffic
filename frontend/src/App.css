@@ -300,6 +300,12 @@ body {
   border: 1px solid var(--border);
 }
 
+.focusCompareRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
 .focusDualRows {
   display: flex;
   flex-direction: column;
