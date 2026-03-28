@@ -300,6 +300,19 @@ body {
   border: 1px solid var(--border);
 }
 
+.focusDualRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.focusDualRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
