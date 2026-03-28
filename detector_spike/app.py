@@ -1011,7 +1011,11 @@ TRACK_ASSOC_IOU_THRESHOLD = _env_float("DETECTOR_TRACK_ASSOC_IOU_THRESHOLD", 0.2
 # When >0: if IoU is below threshold (common at low detect FPS), still match the prior track
 # whose smoothed bbox center is nearest within this many pixels. Set 0 to disable.
 TRACK_ASSOC_CENTER_MAX_PX = _env_float("DETECTOR_TRACK_ASSOC_CENTER_MAX_PX", 96.0)
-TRACK_ASSOC_HUNGARIAN_ENABLED = _env_bool("DETECTOR_TRACK_ASSOC_HUNGARIAN_ENABLED", False)
+# Preferred knob; keep *_ENABLED as a backward-compatible alias.
+TRACK_ASSOC_HUNGARIAN_ENABLED = _env_bool(
+    "DETECTOR_TRACK_ASSOC_HUNGARIAN",
+    _env_bool("DETECTOR_TRACK_ASSOC_HUNGARIAN_ENABLED", False),
+)
 BBOX_EMA_ALPHA = _env_float("DETECTOR_BBOX_EMA_ALPHA", 0.45)
 NIGHT_ENHANCE_ENABLED = _env_bool("DETECTOR_NIGHT_ENHANCE_ENABLED", True)
 NIGHT_LUMA_MEDIAN_THRESHOLD = _night_luma_median_threshold()
@@ -1038,6 +1042,7 @@ inference_lock = threading.Lock()
 @app.get("/internal/health")
 def health() -> dict[str, Any]:
     loaded_ok = ROI_CONFIG.error == "" and len(ROI_CONFIG.stream_specs) > 0
+    assoc_mode = "hungarian" if TRACK_ASSOC_HUNGARIAN_ENABLED else "greedy"
     return {
         "ok": True,
         "model": model_name,
@@ -1048,6 +1053,7 @@ def health() -> dict[str, Any]:
         "track_assoc_iou_threshold": TRACK_ASSOC_IOU_THRESHOLD,
         "track_assoc_center_max_px": TRACK_ASSOC_CENTER_MAX_PX,
         "track_assoc_hungarian_enabled": TRACK_ASSOC_HUNGARIAN_ENABLED,
+        "track_assoc_mode": assoc_mode,
         "track_bbox_ema_alpha": BBOX_EMA_ALPHA,
         "smooth_window_sec": SMOOTH_WINDOW_SEC,
         "night_enhance_enabled": NIGHT_ENHANCE_ENABLED,
